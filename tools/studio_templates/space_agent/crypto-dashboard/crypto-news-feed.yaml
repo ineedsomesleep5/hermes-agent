@@ -1,0 +1,335 @@
+cols: 5
+id: crypto-news-feed
+name: Crypto News
+renderer: |-
+  async (parent, currentSpace) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: white;
+      border-radius: 24px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(246, 190, 99, 0.18), transparent 58%),
+        linear-gradient(180deg, rgba(19, 24, 38, 0.98) 0%, rgba(10, 14, 26, 0.98) 100%);
+      position: relative;
+      user-select: none;
+    `
+
+    const FEEDS = [
+      { label: "CoinDesk", url: "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+      { label: "Cointelegraph", url: "https://cointelegraph.com/rss" },
+      { label: "Decrypt", url: "https://decrypt.co/feed" },
+      { label: "Bitcoin Magazine", url: "https://bitcoinmagazine.com/.rss/full/" },
+      { label: "The Block", url: "https://www.theblock.co/rss.xml" }
+    ]
+    const PREFS_PATH = "~/crypto-news-feed-prefs.json"
+
+    const style = document.createElement("style")
+    style.textContent = `
+      .crypto-news-root{position:relative;width:100%;height:100%;padding:12px 2px 6px;box-sizing:border-box;display:grid;grid-template-rows:auto 1fr;gap:6px;overflow:hidden;}
+      .crypto-news-top{display:flex;justify-content:space-between;align-items:center;gap:10px;}
+      .crypto-news-title{margin-top:6px;font-size:18px;font-weight:700;letter-spacing:-0.02em;}
+      .crypto-news-actions{display:flex;gap:8px;}
+      .crypto-news-btn{width:32px;height:32px;border:none;border-radius:16px;background:rgba(255,255,255,.15);color:white;font-size:15px;backdrop-filter:blur(12px);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+      .crypto-news-list{overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:2px;}
+      .crypto-news-list::-webkit-scrollbar{width:3px;}
+      .crypto-news-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:2px;}
+      .crypto-news-item{padding:7px 8px;border-radius:10px;background:transparent;cursor:pointer;transition:background .15s;}
+      .crypto-news-item:hover{background:rgba(255,255,255,.08);}
+      .crypto-news-item-inner{display:flex;gap:10px;align-items:flex-start;}
+      .crypto-news-item-thumb{width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.08);}
+      .crypto-news-item-body{flex:1;min-width:0;}
+      .crypto-news-item-title{font-size:13px;font-weight:600;line-height:1.35;margin-bottom:3px;}
+      .crypto-news-item-meta{font-size:11px;opacity:.55;display:flex;gap:8px;flex-wrap:wrap;}
+      .crypto-news-modal{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35);backdrop-filter:blur(8px);z-index:5;}
+      .crypto-news-modal-card{width:88%;max-width:300px;background:rgba(20,24,38,.97);border-radius:22px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,.4);}
+      .crypto-news-modal-title{font-size:15px;font-weight:700;margin-bottom:10px;}
+      .crypto-news-feed-option{padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.08);cursor:pointer;margin-bottom:6px;font-size:13px;transition:background .15s;}
+      .crypto-news-feed-option:hover{background:rgba(255,255,255,.16);}
+      .crypto-news-feed-option.active{background:rgba(246,190,99,.22);}
+      .crypto-news-custom-row{display:flex;gap:8px;margin-top:4px;}
+      .crypto-news-input{flex:1;border:none;border-radius:12px;padding:10px 12px;font-size:13px;outline:none;background:rgba(255,255,255,.12);color:white;}
+      .crypto-news-save{border:none;border-radius:12px;padding:10px 14px;background:#f6be63;color:#24190a;cursor:pointer;font-size:13px;font-weight:600;}
+      .crypto-news-close{border:none;border-radius:12px;padding:10px 14px;background:rgba(255,255,255,.14);color:white;cursor:pointer;font-size:13px;width:100%;margin-top:8px;}
+    `
+    parent.appendChild(style)
+
+    const state = { feedUrl: "", feedLabel: "Crypto News", items: [], loading: false, error: "" }
+
+    const root = document.createElement("div")
+    root.className = "crypto-news-root"
+    parent.appendChild(root)
+
+    const top = document.createElement("div")
+    top.className = "crypto-news-top"
+    root.appendChild(top)
+
+    const titleEl = document.createElement("div")
+    titleEl.className = "crypto-news-title"
+    titleEl.textContent = "Crypto News"
+    top.appendChild(titleEl)
+
+    const actions = document.createElement("div")
+    actions.className = "crypto-news-actions"
+    top.appendChild(actions)
+
+    const refreshBtn = document.createElement("button")
+    refreshBtn.className = "crypto-news-btn"
+    refreshBtn.textContent = "↻"
+    refreshBtn.title = "Refresh"
+    actions.appendChild(refreshBtn)
+
+    const cfgBtn = document.createElement("button")
+    cfgBtn.className = "crypto-news-btn"
+    cfgBtn.textContent = "⚙"
+    cfgBtn.title = "Choose feed"
+    actions.appendChild(cfgBtn)
+
+    const list = document.createElement("div")
+    list.className = "crypto-news-list"
+    root.appendChild(list)
+
+    const modal = document.createElement("div")
+    modal.className = "crypto-news-modal"
+    modal.innerHTML = `
+      <div class="crypto-news-modal-card">
+        <div class="crypto-news-modal-title">Choose feed</div>
+        <div data-role="feed-options"></div>
+        <div class="crypto-news-custom-row">
+          <input data-role="custom-url" class="crypto-news-input" placeholder="Custom RSS URL…" />
+          <button data-role="custom-save" class="crypto-news-save">Go</button>
+        </div>
+        <button data-role="modal-close" class="crypto-news-close">Close</button>
+      </div>
+    `
+    root.appendChild(modal)
+
+    const feedOptions = modal.querySelector("[data-role='feed-options']")
+    const customUrl = modal.querySelector("[data-role='custom-url']")
+    const customSave = modal.querySelector("[data-role='custom-save']")
+    const modalClose = modal.querySelector("[data-role='modal-close']")
+
+    function collapseWhitespace(value) {
+      return String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return ""
+      const date = new Date(dateStr)
+      if (Number.isNaN(date.getTime())) return ""
+      const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000)
+      if (diffMinutes < 1) return "just now"
+      if (diffMinutes < 60) return `${diffMinutes}m ago`
+      if (diffMinutes < 1440) return `${Math.floor(diffMinutes / 60)}h ago`
+      return `${Math.floor(diffMinutes / 1440)}d ago`
+    }
+
+    function getEntryLink(entry) {
+      const links = Array.from(entry.querySelectorAll("link"))
+      for (const linkEl of links) {
+        const href = collapseWhitespace(linkEl.getAttribute("href") || "")
+        if (href) return href
+        const text = collapseWhitespace(linkEl.textContent || "")
+        if (text) return text
+      }
+      return "#"
+    }
+
+    function extractImage(entry) {
+      const mediaContent = entry.querySelector("content, media\\:content")
+      if (mediaContent?.getAttribute("url")) return mediaContent.getAttribute("url")
+
+      const mediaThumbnail = entry.querySelector("thumbnail, media\\:thumbnail")
+      if (mediaThumbnail?.getAttribute("url")) return mediaThumbnail.getAttribute("url")
+
+      const enclosure = entry.querySelector("enclosure")
+      if (enclosure?.getAttribute("type")?.startsWith("image")) return enclosure.getAttribute("url") || ""
+
+      const summary = entry.querySelector("description, summary, content\\:encoded")?.textContent || ""
+      const match = summary.match(/<img[^>]+src=["']([^"']+)["']/i)
+      return match ? match[1] : ""
+    }
+
+    function renderOptions() {
+      feedOptions.innerHTML = ""
+      FEEDS.forEach((feed) => {
+        const option = document.createElement("div")
+        option.className = "crypto-news-feed-option" + (state.feedUrl === feed.url ? " active" : "")
+        option.textContent = feed.label
+        option.onclick = async () => {
+          state.feedUrl = feed.url
+          state.feedLabel = feed.label
+          await savePrefs()
+          modal.style.display = "none"
+          await loadFeed()
+        }
+        feedOptions.appendChild(option)
+      })
+    }
+
+    function renderList() {
+      list.innerHTML = ""
+
+      if (state.loading) {
+        const status = document.createElement("div")
+        status.style.cssText = "padding:20px;text-align:center;opacity:.5;font-size:13px;"
+        status.textContent = "Loading…"
+        list.appendChild(status)
+        return
+      }
+
+      if (state.error) {
+        const status = document.createElement("div")
+        status.style.cssText = "padding:20px;text-align:center;opacity:.6;font-size:13px;"
+        status.textContent = state.error
+        list.appendChild(status)
+        return
+      }
+
+      if (!state.items.length) {
+        const status = document.createElement("div")
+        status.style.cssText = "padding:20px;text-align:center;opacity:.5;font-size:13px;"
+        status.textContent = "No items found."
+        list.appendChild(status)
+        return
+      }
+
+      state.items.forEach((item) => {
+        const card = document.createElement("div")
+        card.className = "crypto-news-item"
+
+        const inner = document.createElement("div")
+        inner.className = "crypto-news-item-inner"
+
+        if (item.thumb) {
+          const image = document.createElement("img")
+          image.className = "crypto-news-item-thumb"
+          image.src = item.thumb
+          image.alt = ""
+          image.onerror = () => {
+            image.style.display = "none"
+          }
+          inner.appendChild(image)
+        }
+
+        const body = document.createElement("div")
+        body.className = "crypto-news-item-body"
+        body.innerHTML = `
+          <div class="crypto-news-item-title">${item.title}</div>
+          <div class="crypto-news-item-meta">
+            ${item.category ? `<span>${item.category}</span>` : ""}
+            ${item.date ? `<span>${timeAgo(item.date)}</span>` : ""}
+          </div>
+        `
+        inner.appendChild(body)
+        card.appendChild(inner)
+        card.onclick = () => window.open(item.link, "_blank")
+        list.appendChild(card)
+      })
+    }
+
+    async function savePrefs() {
+      await currentSpace.api
+        .fileWrite(PREFS_PATH, JSON.stringify({ feedUrl: state.feedUrl, feedLabel: state.feedLabel }), "utf8")
+        .catch(() => {})
+    }
+
+    async function loadPrefs() {
+      try {
+        const raw = await currentSpace.api.fileRead(PREFS_PATH, "utf8")
+        const prefs = JSON.parse(raw)
+        if (prefs.feedUrl) {
+          state.feedUrl = prefs.feedUrl
+          state.feedLabel = prefs.feedLabel || "Crypto News"
+        }
+      } catch {}
+    }
+
+    async function fetchFeed(feedUrl) {
+      const response = await space.fetchExternal(feedUrl, {
+        signal: AbortSignal.timeout(10000)
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.text()
+    }
+
+    async function loadFeed() {
+      state.loading = true
+      state.error = ""
+      titleEl.textContent = state.feedLabel
+      renderList()
+
+      try {
+        const source = await fetchFeed(state.feedUrl)
+        const documentRoot = new DOMParser().parseFromString(source, "text/xml")
+        const entries = Array.from(documentRoot.querySelectorAll("item, entry"))
+
+        state.items = entries.slice(0, 30).map((entry) => ({
+          title: collapseWhitespace(entry.querySelector("title")?.textContent || "Untitled"),
+          link: getEntryLink(entry),
+          date: collapseWhitespace(entry.querySelector("pubDate, published, updated")?.textContent || ""),
+          thumb: extractImage(entry),
+          category:
+            collapseWhitespace(entry.querySelector("category")?.textContent || "") ||
+            collapseWhitespace(entry.querySelector("category")?.getAttribute("term") || "")
+        }))
+
+        state.loading = false
+        renderList()
+      } catch (error) {
+        console.error("[spaces/onboarding/crypto-dashboard/crypto-news-feed] unable to load feed", error)
+        state.loading = false
+        state.error = "Failed to load feed."
+        renderList()
+      }
+    }
+
+    cfgBtn.onclick = () => {
+      renderOptions()
+      customUrl.value = ""
+      modal.style.display = "flex"
+    }
+
+    refreshBtn.onclick = () => {
+      void loadFeed()
+    }
+
+    modalClose.onclick = () => {
+      modal.style.display = "none"
+    }
+
+    customSave.onclick = async () => {
+      const value = customUrl.value.trim()
+      if (!value) return
+      state.feedUrl = value
+      state.feedLabel = "Custom"
+      await savePrefs()
+      modal.style.display = "none"
+      await loadFeed()
+    }
+
+    await loadPrefs()
+    if (!state.feedUrl) {
+      state.feedUrl = FEEDS[0].url
+      state.feedLabel = FEEDS[0].label
+    }
+    await loadFeed()
+
+    return () => {
+      cfgBtn.onclick = null
+      refreshBtn.onclick = null
+      modalClose.onclick = null
+      customSave.onclick = null
+    }
+  }
+rows: 7
+schema: space-widget/v1
+col: 2
+row: -4

@@ -1,0 +1,592 @@
+cols: 8
+id: btc-vs-sp500
+name: BTC vs S&P 500
+renderer: |-
+  async (parent) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
+      color: #eef5ff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #07111f;
+      border-radius: 20px;
+      position: relative;
+    `
+
+    const style = document.createElement("style")
+    style.textContent = `
+      .market-compare-root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        gap: 12px;
+        padding: 18px 14px 14px;
+        border-radius: 20px;
+        border: 1px solid rgba(141, 183, 255, 0.16);
+        background:
+          radial-gradient(circle at top left, rgba(94, 157, 255, 0.16), transparent 44%),
+          radial-gradient(circle at top right, rgba(111, 205, 255, 0.12), transparent 36%),
+          linear-gradient(180deg, #0e1b31 0%, #07111f 100%);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.04),
+          inset 0 -18px 32px rgba(0, 0, 0, 0.28);
+      }
+
+      .market-compare-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .market-compare-kicker {
+        font-size: 0.7rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(194, 214, 255, 0.68);
+      }
+
+      .market-compare-title {
+        margin-top: 10px;
+        font-size: 1.28rem;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        color: #f7fbff;
+      }
+
+      .market-compare-updated {
+        flex-shrink: 0;
+        padding-top: 2px;
+        font-size: 0.76rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(194, 214, 255, 0.58);
+        text-align: right;
+      }
+
+      .market-compare-summary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .market-compare-pill {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(7, 17, 31, 0.42);
+        display: grid;
+        gap: 4px;
+      }
+
+      .market-compare-pill-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.75rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(226, 236, 255, 0.72);
+      }
+
+      .market-compare-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        flex-shrink: 0;
+      }
+
+      .market-compare-dot.is-btc {
+        background: #6fd1ff;
+        box-shadow: 0 0 0 4px rgba(111, 209, 255, 0.12);
+      }
+
+      .market-compare-dot.is-spx {
+        background: #8fa8ff;
+        box-shadow: 0 0 0 4px rgba(143, 168, 255, 0.11);
+      }
+
+      .market-compare-pill-change {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #f8fbff;
+      }
+
+      .market-compare-pill-meta {
+        font-size: 0.82rem;
+        color: rgba(210, 225, 255, 0.64);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .market-compare-chart-card {
+        min-height: 0;
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        background: rgba(5, 11, 24, 0.46);
+        overflow: hidden;
+        position: relative;
+      }
+
+      .market-compare-chart {
+        width: 100%;
+        height: 100%;
+        min-height: 220px;
+      }
+
+      .market-compare-chart svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .market-compare-status {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        box-sizing: border-box;
+        text-align: center;
+        font-size: 0.88rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(214, 226, 255, 0.58);
+      }
+
+      .market-compare-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+        font-size: 0.78rem;
+        color: rgba(208, 223, 255, 0.64);
+      }
+
+      .market-compare-foot span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    `
+    parent.appendChild(style)
+
+    const root = document.createElement("div")
+    root.className = "market-compare-root"
+    root.innerHTML = `
+      <div class="market-compare-top">
+        <div>
+          <div class="market-compare-kicker">Normalized Performance</div>
+          <div class="market-compare-title">BTC vs S&amp;P 500</div>
+        </div>
+        <div class="market-compare-updated" data-role="updated">Loading data</div>
+      </div>
+      <div class="market-compare-summary">
+        <div class="market-compare-pill" data-role="btc-pill">
+          <div class="market-compare-pill-head">
+            <span class="market-compare-dot is-btc"></span>
+            <span>BTC</span>
+          </div>
+          <div class="market-compare-pill-change" data-role="btc-change">--</div>
+          <div class="market-compare-pill-meta" data-role="btc-meta">Waiting for price</div>
+        </div>
+        <div class="market-compare-pill" data-role="spx-pill">
+          <div class="market-compare-pill-head">
+            <span class="market-compare-dot is-spx"></span>
+            <span>S&amp;P 500</span>
+          </div>
+          <div class="market-compare-pill-change" data-role="spx-change">--</div>
+          <div class="market-compare-pill-meta" data-role="spx-meta">Waiting for price</div>
+        </div>
+      </div>
+      <div class="market-compare-chart-card">
+        <div class="market-compare-chart" data-role="chart"></div>
+      </div>
+      <div class="market-compare-foot">
+        <span data-role="range">Last month</span>
+        <span data-role="base">Base = 100</span>
+      </div>
+    `
+    parent.appendChild(root)
+
+    const updatedEl = root.querySelector("[data-role='updated']")
+    const chartEl = root.querySelector("[data-role='chart']")
+    const rangeEl = root.querySelector("[data-role='range']")
+    const baseEl = root.querySelector("[data-role='base']")
+    const btcChangeEl = root.querySelector("[data-role='btc-change']")
+    const btcMetaEl = root.querySelector("[data-role='btc-meta']")
+    const spxChangeEl = root.querySelector("[data-role='spx-change']")
+    const spxMetaEl = root.querySelector("[data-role='spx-meta']")
+
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const DISPLAY_POINTS = 30
+    const LOOKBACK_DAYS = 40
+    const CHART_VIEWBOX_WIDTH = 620
+    const CHART_VIEWBOX_HEIGHT = 260
+    const CHART_LEFT = 28
+    const CHART_TOP = 10
+    const CHART_RIGHT = 72
+    const CHART_BOTTOM = 18
+    const CHART_WIDTH = CHART_VIEWBOX_WIDTH - CHART_LEFT - CHART_RIGHT
+    const CHART_HEIGHT = CHART_VIEWBOX_HEIGHT - CHART_TOP - CHART_BOTTOM
+
+    function formatDateKey(value) {
+      const date = value instanceof Date ? value : new Date(value)
+      return date.toISOString().slice(0, 10)
+    }
+
+    function formatShortDate(value) {
+      return new Date(value).toLocaleDateString([], {
+        month: "short",
+        day: "numeric"
+      })
+    }
+
+    function formatCurrency(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return "--"
+      if (number >= 1000) {
+        return `$${number.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      }
+      return `$${number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    }
+
+    function formatSignedPercent(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return "--"
+      return `${number >= 0 ? "+" : "-"}${Math.abs(number).toFixed(1)}%`
+    }
+
+    function renderStatus(message) {
+      chartEl.innerHTML = `<div class="market-compare-status">${message}</div>`
+    }
+
+    function parseFredCsv(csvSource) {
+      return String(csvSource || "")
+        .trim()
+        .split(/\r?\n/g)
+        .slice(1)
+        .map((line) => line.split(","))
+        .map(([dateText, valueText]) => {
+          const value = Number(valueText)
+          const timestamp = Date.parse(`${dateText}T00:00:00Z`)
+          if (!dateText || !Number.isFinite(value) || !Number.isFinite(timestamp)) {
+            return null
+          }
+          return {
+            timestamp,
+            value
+          }
+        })
+        .filter(Boolean)
+    }
+
+    function normalizeBitcoinPoints(entries) {
+      const byDate = new Map()
+
+      entries.forEach((entry) => {
+        const [timestampValue, priceValue] = Array.isArray(entry) ? entry : []
+        const timestamp = Number(timestampValue)
+        const price = Number(priceValue)
+
+        if (!Number.isFinite(timestamp) || !Number.isFinite(price)) return
+
+        const dateKey = formatDateKey(timestamp)
+        byDate.set(dateKey, {
+          timestamp: Date.parse(`${dateKey}T00:00:00Z`),
+          value: price
+        })
+      })
+
+      return [...byDate.values()].sort((left, right) => left.timestamp - right.timestamp)
+    }
+
+    function repairNonPositiveSeries(points) {
+      const repaired = points
+        .filter((point) => Number.isFinite(point?.timestamp) && Number.isFinite(point?.value))
+        .sort((left, right) => left.timestamp - right.timestamp)
+        .map((point) => ({
+          timestamp: point.timestamp,
+          value: Number(point.value)
+        }))
+
+      let index = 0
+
+      while (index < repaired.length) {
+        if (repaired[index].value > 0) {
+          index += 1
+          continue
+        }
+
+        const gapStart = index
+
+        while (index < repaired.length && !(repaired[index].value > 0)) {
+          index += 1
+        }
+
+        const previousPoint = gapStart > 0 ? repaired[gapStart - 1] : null
+        const nextPoint = index < repaired.length ? repaired[index] : null
+
+        for (let fillIndex = gapStart; fillIndex < index; fillIndex += 1) {
+          if (previousPoint && nextPoint) {
+            const span = Math.max(nextPoint.timestamp - previousPoint.timestamp, 1)
+            const progress = (repaired[fillIndex].timestamp - previousPoint.timestamp) / span
+            repaired[fillIndex].value =
+              previousPoint.value + (nextPoint.value - previousPoint.value) * progress
+            continue
+          }
+
+          if (previousPoint) {
+            repaired[fillIndex].value = previousPoint.value
+            continue
+          }
+
+          if (nextPoint) {
+            repaired[fillIndex].value = nextPoint.value
+          }
+        }
+      }
+
+      return repaired.filter((point) => point.value > 0)
+    }
+
+    function mergeSeries(bitcoinSeries, sp500Series) {
+      const merged = []
+      let sp500Index = 0
+      let latestSp500Value = null
+
+      bitcoinSeries.forEach((bitcoinPoint) => {
+        while (
+          sp500Index < sp500Series.length &&
+          sp500Series[sp500Index].timestamp <= bitcoinPoint.timestamp
+        ) {
+          latestSp500Value = sp500Series[sp500Index].value
+          sp500Index += 1
+        }
+
+        if (!Number.isFinite(latestSp500Value)) return
+
+        merged.push({
+          timestamp: bitcoinPoint.timestamp,
+          btc: bitcoinPoint.value,
+          sp500: latestSp500Value
+        })
+      })
+
+      return merged.slice(-DISPLAY_POINTS)
+    }
+
+    function normalizePerformance(points) {
+      if (!points.length) return []
+
+      const baseBitcoin = points[0].btc
+      const baseSp500 = points[0].sp500
+
+      return points.map((point) => ({
+        ...point,
+        btcIndex: (point.btc / baseBitcoin) * 100,
+        sp500Index: (point.sp500 / baseSp500) * 100
+      }))
+    }
+
+    function buildSeriesCoordinates(points, valueKey) {
+      const values = points.map((point) => Number(point[valueKey])).filter(Number.isFinite)
+      const minimum = Math.min(...values)
+      const maximum = Math.max(...values)
+      const padding = Math.max(1.1, (maximum - minimum) * 0.16 || 2.5)
+      const floor = minimum - padding
+      const ceiling = maximum + padding
+      const divisor = Math.max(ceiling - floor, 1)
+
+      return points.map((point, index) => {
+        const x =
+          CHART_LEFT +
+          (points.length <= 1 ? CHART_WIDTH / 2 : (index / (points.length - 1)) * CHART_WIDTH)
+        const y =
+          CHART_TOP +
+          CHART_HEIGHT -
+          ((Number(point[valueKey]) - floor) / divisor) * CHART_HEIGHT
+
+        return {
+          x,
+          y
+        }
+      })
+    }
+
+    function buildPath(points) {
+      return points
+        .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+        .join(" ")
+    }
+
+    function renderChart(points) {
+      const performancePoints = normalizePerformance(points)
+      const allValues = performancePoints.flatMap((point) => [point.btcIndex, point.sp500Index])
+      const minimum = Math.min(...allValues)
+      const maximum = Math.max(...allValues)
+      const padding = Math.max(1.1, (maximum - minimum) * 0.16 || 2.5)
+      const floor = minimum - padding
+      const ceiling = maximum + padding
+      const divisor = Math.max(ceiling - floor, 1)
+
+      const toY = (value) =>
+        CHART_TOP + CHART_HEIGHT - ((Number(value) - floor) / divisor) * CHART_HEIGHT
+      const toX = (index) =>
+        CHART_LEFT +
+        (performancePoints.length <= 1
+          ? CHART_WIDTH / 2
+          : (index / (performancePoints.length - 1)) * CHART_WIDTH)
+
+      const btcCoords = performancePoints.map((point, index) => ({
+        x: toX(index),
+        y: toY(point.btcIndex)
+      }))
+      const spxCoords = performancePoints.map((point, index) => ({
+        x: toX(index),
+        y: toY(point.sp500Index)
+      }))
+
+      const guideValues = Array.from({ length: 4 }, (_, index) => ceiling - (index * (ceiling - floor)) / 3)
+      const btcPath = buildPath(btcCoords)
+      const spxPath = buildPath(spxCoords)
+      const lastPoint = performancePoints[performancePoints.length - 1]
+      const firstPoint = performancePoints[0]
+      const lastBitcoin = btcCoords[btcCoords.length - 1]
+      const lastSp500 = spxCoords[spxCoords.length - 1]
+
+      chartEl.innerHTML = `
+        <svg viewBox="0 0 ${CHART_VIEWBOX_WIDTH} ${CHART_VIEWBOX_HEIGHT}" aria-label="BTC versus S&P 500 chart">
+          <rect x="0" y="0" width="${CHART_VIEWBOX_WIDTH}" height="${CHART_VIEWBOX_HEIGHT}" fill="transparent"></rect>
+          ${guideValues
+            .map((value) => {
+              const y = toY(value)
+              return `
+                <line
+                  x1="${CHART_LEFT}"
+                  y1="${y.toFixed(2)}"
+                  x2="${(CHART_LEFT + CHART_WIDTH).toFixed(2)}"
+                  y2="${y.toFixed(2)}"
+                  stroke="rgba(182, 208, 255, 0.1)"
+                  stroke-width="1"
+                  vector-effect="non-scaling-stroke"
+                ></line>
+                <text
+                  x="${(CHART_VIEWBOX_WIDTH - 4).toFixed(2)}"
+                  y="${(y + 4).toFixed(2)}"
+                  fill="rgba(209, 222, 255, 0.56)"
+                  font-size="11"
+                  text-anchor="end"
+                >${value.toFixed(0)}</text>
+              `
+            })
+            .join("")}
+          <path
+            d="${spxPath}"
+            fill="none"
+            stroke="#8fa8ff"
+            stroke-opacity="0.82"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
+          ></path>
+          <path
+            d="${btcPath}"
+            fill="none"
+            stroke="#6fd1ff"
+            stroke-opacity="0.78"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
+          ></path>
+          <circle cx="${lastSp500.x.toFixed(2)}" cy="${lastSp500.y.toFixed(2)}" r="4.5" fill="#8fa8ff"></circle>
+          <circle cx="${lastBitcoin.x.toFixed(2)}" cy="${lastBitcoin.y.toFixed(2)}" r="4.5" fill="#6fd1ff"></circle>
+        </svg>
+      `
+
+      btcChangeEl.textContent = formatSignedPercent(lastPoint.btcIndex - 100)
+      btcMetaEl.textContent = `${formatCurrency(lastPoint.btc)} now`
+      spxChangeEl.textContent = formatSignedPercent(lastPoint.sp500Index - 100)
+      spxMetaEl.textContent = `${lastPoint.sp500.toLocaleString(undefined, { maximumFractionDigits: 2 })} now`
+      rangeEl.textContent = `${formatShortDate(firstPoint.timestamp)} to ${formatShortDate(lastPoint.timestamp)}`
+      baseEl.textContent = `Base ${formatShortDate(firstPoint.timestamp)} = 100`
+    }
+
+    let alive = true
+
+    async function updateChart() {
+      if (!alive) return
+
+      renderStatus("Fetching prices")
+      updatedEl.textContent = "Refreshing market data"
+
+      try {
+        const endDate = new Date()
+        const startDate = new Date(Date.now() - LOOKBACK_DAYS * DAY_MS)
+        const fredUrl = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500&cosd=${formatDateKey(startDate)}&coed=${formatDateKey(endDate)}`
+
+        const [bitcoinResponse, sp500Response] = await Promise.all([
+          space.fetchExternal("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=40&interval=daily", {
+            signal: AbortSignal.timeout(15000)
+          }),
+          space.fetchExternal(fredUrl, {
+            signal: AbortSignal.timeout(15000)
+          })
+        ])
+
+        if (!bitcoinResponse.ok) throw new Error(`CoinGecko HTTP ${bitcoinResponse.status}`)
+        if (!sp500Response.ok) throw new Error(`FRED HTTP ${sp500Response.status}`)
+
+        const bitcoinData = await bitcoinResponse.json()
+        const sp500Csv = await sp500Response.text()
+        const bitcoinSeries = repairNonPositiveSeries(normalizeBitcoinPoints(bitcoinData?.prices || []))
+        const sp500Series = repairNonPositiveSeries(parseFredCsv(sp500Csv))
+        const points = mergeSeries(bitcoinSeries, sp500Series)
+
+        if (points.length < 7) {
+          throw new Error("Not enough price history to plot this chart.")
+        }
+
+        renderChart(points)
+        updatedEl.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      } catch (error) {
+        console.error("[spaces/onboarding/crypto-dashboard/btc-vs-sp500] unable to load market chart", error)
+        renderStatus("Chart unavailable")
+        updatedEl.textContent = "Feed unavailable"
+        btcChangeEl.textContent = "--"
+        btcMetaEl.textContent = "CoinGecko unavailable"
+        spxChangeEl.textContent = "--"
+        spxMetaEl.textContent = "FRED unavailable"
+        rangeEl.textContent = "Last month"
+        baseEl.textContent = "Base = 100"
+      }
+    }
+
+    await updateChart()
+    const timer = window.setInterval(() => {
+      void updateChart()
+    }, 15 * 60 * 1000)
+
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }
+rows: 7
+schema: space-widget/v1
+col: -6
+row: -4

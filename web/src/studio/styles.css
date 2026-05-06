@@ -1,0 +1,1302 @@
+/* ---------------------------------------------------------------------------
+ * Hermes Studio — design tokens
+ *
+ * Mono metallic + liquid glass + Tron-red signal. Scoped to .hermes-studio
+ * so the rest of the dashboard is untouched.
+ * ------------------------------------------------------------------------- */
+
+.hermes-studio {
+  /* Base palette */
+  --studio-canvas: #080808;
+  --studio-grid: rgba(255, 255, 255, 0.03);
+  --studio-text: #f5f5f5;
+  --studio-text-dim: rgba(255, 255, 255, 0.55);
+  --studio-text-fade: rgba(255, 255, 255, 0.32);
+
+  /* Glass surfaces */
+  --studio-glass-fill: rgba(255, 255, 255, 0.055);
+  --studio-glass-fill-strong: rgba(255, 255, 255, 0.08);
+  --studio-glass-blur: 4px;
+  --studio-glass-blur-strong: 30px;
+
+  /* Tron-red signal */
+  --studio-signal: #ff2020;
+  --studio-signal-glow: 0 0 6px #ff2020,
+    0 0 18px rgba(255, 32, 32, 0.5),
+    0 0 40px rgba(255, 32, 32, 0.15);
+  --studio-signal-glow-soft: 0 0 4px rgba(255, 32, 32, 0.7),
+    0 0 12px rgba(255, 32, 32, 0.3);
+
+  /* Layout */
+  --studio-grid-unit: 80px; /* 1 logical grid cell = 80px on screen */
+  --studio-panel-radius: 14px;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue",
+    sans-serif;
+  letter-spacing: -0.01em;
+  color: var(--studio-text);
+  background: var(--studio-canvas);
+}
+
+/* ---------------------------------------------------------------------------
+ * Liquid glass — subtle (panels, tooltips)
+ * ------------------------------------------------------------------------- */
+
+.studio-glass {
+  background: var(--studio-glass-fill);
+  background-blend-mode: luminosity;
+  backdrop-filter: blur(var(--studio-glass-blur));
+  -webkit-backdrop-filter: blur(var(--studio-glass-blur));
+  border: none;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--studio-panel-radius);
+}
+
+.studio-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.4px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0.15) 20%,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0) 60%,
+    rgba(255, 255, 255, 0.15) 80%,
+    rgba(255, 255, 255, 0.45) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Strong variant — chat panel, modals */
+.studio-glass-strong {
+  background: var(--studio-glass-fill-strong);
+  background-blend-mode: luminosity;
+  backdrop-filter: blur(var(--studio-glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--studio-glass-blur-strong));
+  border: none;
+  box-shadow:
+    4px 4px 16px rgba(0, 0, 0, 0.35),
+    inset 0 1px 1px rgba(255, 255, 255, 0.15);
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--studio-panel-radius);
+}
+
+.studio-glass-strong::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.4px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(255, 255, 255, 0.2) 20%,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0) 60%,
+    rgba(255, 255, 255, 0.2) 80%,
+    rgba(255, 255, 255, 0.5) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * Studio root + canvas
+ * ------------------------------------------------------------------------- */
+
+.hermes-studio {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  z-index: 50;
+}
+
+.studio-canvas {
+  position: absolute;
+  inset: 0;
+  background-color: var(--studio-canvas);
+  /* Grid lives on the canvas (not the transformed content) so it stays a
+     visual reference even at extreme zooms. The transform layer carries
+     the widgets themselves. */
+  background-image:
+    linear-gradient(var(--studio-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--studio-grid) 1px, transparent 1px);
+  background-size: var(--studio-grid-unit) var(--studio-grid-unit);
+  background-position: 0 0;
+  user-select: none;
+  cursor: grab;
+  overflow: hidden;
+}
+
+.studio-canvas:active {
+  cursor: grabbing;
+}
+
+/* The transform layer — pan + zoom apply here. Widgets render in world
+   coordinates; this container scales/translates the entire grid. */
+.studio-canvas-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  /* Children overflow this 0×0 anchor; that's intentional — `transform-origin: 0 0`
+     on the parent means widget world coords map directly to its origin. */
+  will-change: transform;
+}
+
+.studio-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--studio-text-fade);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ---------------------------------------------------------------------------
+ * Widget cards
+ * ------------------------------------------------------------------------- */
+
+.studio-widget {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  min-height: 120px;
+  transition: box-shadow 200ms ease;
+}
+
+.studio-widget.is-minimized {
+  height: 36px !important;
+  min-height: 36px;
+}
+
+.studio-widget.is-streaming::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: var(--studio-signal-glow-soft);
+  animation: studio-pulse 1.6s ease-in-out infinite;
+}
+
+.studio-widget.is-active {
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.15),
+    var(--studio-signal-glow-soft);
+}
+
+.studio-widget.is-annotation-mode {
+  cursor: crosshair;
+}
+
+.studio-widget.is-annotation-selected {
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.15),
+    0 0 0 1px rgba(255, 32, 32, 0.46),
+    var(--studio-signal-glow-soft);
+}
+
+/* Transient red bloom for newly-created or just-edited widgets. Fades
+   out on its own; React removes the class after FLASH_MS. */
+.studio-widget.is-flash {
+  animation: studio-flash 2.4s ease-out forwards;
+}
+
+@keyframes studio-flash {
+  0% {
+    box-shadow:
+      inset 0 1px 1px rgba(255, 255, 255, 0.18),
+      0 0 12px #ff2020,
+      0 0 32px rgba(255, 32, 32, 0.65),
+      0 0 72px rgba(255, 32, 32, 0.25);
+  }
+  100% {
+    box-shadow:
+      inset 0 1px 1px rgba(255, 255, 255, 0.1),
+      0 0 0 rgba(255, 32, 32, 0);
+  }
+}
+
+.studio-widget-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--studio-text-dim);
+  cursor: grab;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.studio-widget-header:active {
+  cursor: grabbing;
+}
+
+.studio-widget-note-badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 3;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 32, 32, 0.35);
+  background: rgba(255, 32, 32, 0.16);
+  color: var(--studio-text);
+  font: 700 0.64rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+  box-shadow: var(--studio-signal-glow-soft);
+  cursor: pointer;
+}
+
+.studio-widget-title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--studio-text);
+}
+
+.studio-widget-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.studio-widget-action {
+  background: transparent;
+  border: none;
+  color: var(--studio-text-fade);
+  cursor: pointer;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color 120ms,
+    background 120ms;
+}
+
+.studio-widget-action:hover {
+  color: var(--studio-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.studio-widget-action.is-destructive:hover {
+  color: var(--studio-signal);
+  text-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-widget-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.studio-widget-error {
+  padding: 12px;
+  font-size: 0.75rem;
+  color: var(--studio-signal);
+  text-shadow: var(--studio-signal-glow-soft);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.studio-widget-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  z-index: 2;
+}
+
+.studio-widget-resize::before {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--studio-text-fade);
+  border-bottom: 1px solid var(--studio-text-fade);
+}
+
+.studio-live-pill {
+  position: absolute;
+  left: 24px;
+  top: 70px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 0.62rem;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--studio-text-dim);
+  pointer-events: none;
+}
+
+.studio-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--studio-signal);
+  box-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-live-pill.is-open .studio-live-dot {
+  animation: studio-pulse 1.8s ease-in-out infinite;
+}
+
+.studio-live-pill.is-connecting .studio-live-dot,
+.studio-live-pill.is-closed .studio-live-dot {
+  opacity: 0.45;
+}
+
+/* ---------------------------------------------------------------------------
+ * Floating chat panel (Phase 2e — placeholder for now)
+ * ------------------------------------------------------------------------- */
+
+.studio-chat {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  width: var(--studio-chat-width, 380px);
+  height: var(--studio-chat-height, 560px);
+  min-width: 320px;
+  min-height: 280px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.studio-chat-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px 12px 44px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--studio-text);
+}
+
+.studio-chat-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--studio-signal);
+  box-shadow: var(--studio-signal-glow-soft);
+  animation: studio-pulse 1.8s ease-in-out infinite;
+}
+
+.studio-chat-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 16px 12px;
+  font-size: 0.85rem;
+  color: var(--studio-text-dim);
+  min-height: 120px;
+}
+
+.studio-chat-input {
+  flex: 0 0 auto;
+  padding: 12px 16px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.studio-chat-input-field {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: var(--studio-text);
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 120ms;
+}
+
+.studio-chat-input-field:focus {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.studio-chat-history-button {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: var(--studio-text-dim);
+  cursor: pointer;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  padding: 5px 8px;
+  text-transform: uppercase;
+}
+
+.studio-chat-history-button:hover,
+.studio-chat-history-button:focus-visible,
+.studio-chat-history-button.is-active {
+  border-color: rgba(255, 32, 32, 0.42);
+  color: var(--studio-text);
+  outline: none;
+  text-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-chat-history {
+  flex: 0 0 auto;
+  margin: 0 12px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.studio-chat-history-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--studio-text);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.studio-chat-history-top button,
+.studio-chat-history-delete {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  color: var(--studio-text-dim);
+  cursor: pointer;
+  font-size: 0.68rem;
+  padding: 5px 8px;
+}
+
+.studio-chat-history-list {
+  max-height: 190px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.studio-chat-history-empty {
+  color: var(--studio-text-dim);
+  font-size: 0.78rem;
+  padding: 10px;
+}
+
+.studio-chat-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.studio-chat-history-item + .studio-chat-history-item {
+  margin-top: 6px;
+}
+
+.studio-chat-history-item > button:first-child {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--studio-text);
+  cursor: pointer;
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.studio-chat-history-item.is-current > button:first-child {
+  border-color: rgba(255, 32, 32, 0.42);
+  box-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-chat-history-item span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
+.studio-chat-history-item small {
+  color: var(--studio-text-fade);
+  font-size: 0.66rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Top brand strip
+ * ------------------------------------------------------------------------- */
+
+.studio-brand {
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.studio-brand-mark {
+  font-size: 0.85rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--studio-text);
+}
+
+.studio-brand-sub {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--studio-text-fade);
+}
+
+.studio-brand-back {
+  pointer-events: auto;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--studio-text-dim);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    color 120ms,
+    border-color 120ms;
+}
+
+.studio-brand-back:hover {
+  color: var(--studio-text);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.studio-brand-back.is-live {
+  border-color: rgba(255, 32, 32, 0.38);
+  color: var(--studio-text);
+  box-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-template-drawer {
+  position: absolute;
+  top: 66px;
+  left: 24px;
+  z-index: 12;
+  width: min(640px, calc(100vw - 48px));
+  max-height: min(70dvh, 620px);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.studio-annotation-panel {
+  position: absolute;
+  top: 66px;
+  right: 24px;
+  z-index: 12;
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(70dvh, 620px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.studio-template-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+
+.studio-template-head h2 {
+  margin: 2px 0 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.studio-template-eyebrow {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--studio-text-fade);
+}
+
+.studio-template-close {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--studio-text-dim);
+  cursor: pointer;
+}
+
+.studio-template-grid {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.studio-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.studio-template-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.studio-template-card h3 {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.2;
+}
+
+.studio-template-card span {
+  flex: 0 0 auto;
+  font: 0.66rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--studio-text-fade);
+}
+
+.studio-template-meta {
+  margin-top: -4px;
+  font: 0.64rem/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.36);
+}
+
+.studio-template-card p,
+.studio-options-menu p {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--studio-text-dim);
+}
+
+.studio-template-card button,
+.studio-options-menu button {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--studio-text);
+  cursor: pointer;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.studio-template-card button:hover,
+.studio-options-menu button:hover {
+  border-color: rgba(255, 32, 32, 0.38);
+  box-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-template-card button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.studio-template-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: var(--studio-signal);
+  background: rgba(255, 32, 32, 0.08);
+  font-size: 0.74rem;
+}
+
+.studio-annotation-summary {
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--studio-text-dim);
+}
+
+.studio-annotation-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 86px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  color: var(--studio-text);
+  padding: 12px;
+  resize: vertical;
+  font: 0.82rem/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.studio-annotation-input:focus {
+  outline: none;
+  border-color: rgba(255, 32, 32, 0.34);
+  box-shadow: var(--studio-signal-glow-soft);
+}
+
+.studio-annotation-save {
+  min-height: 40px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 32, 32, 0.28);
+  background: rgba(255, 32, 32, 0.12);
+  color: var(--studio-text);
+  cursor: pointer;
+}
+
+.studio-annotation-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.studio-annotation-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.studio-annotation-empty {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--studio-text-fade);
+  font-size: 0.76rem;
+}
+
+.studio-annotation-card {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.studio-annotation-card.is-resolved {
+  opacity: 0.62;
+}
+
+.studio-annotation-card.is-pending {
+  border-color: rgba(255, 32, 32, 0.24);
+  background: linear-gradient(135deg, rgba(255, 32, 32, 0.12), rgba(255, 255, 255, 0.04));
+}
+
+.studio-annotation-card-head,
+.studio-annotation-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.studio-annotation-card-head {
+  font: 0.66rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--studio-text-fade);
+}
+
+.studio-annotation-card p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--studio-text);
+}
+
+.studio-annotation-card-actions button {
+  min-height: 34px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--studio-text-dim);
+  cursor: pointer;
+  padding: 0 10px;
+}
+
+.studio-annotation-card-actions button:hover {
+  color: var(--studio-text);
+  border-color: rgba(255, 32, 32, 0.24);
+}
+
+.studio-options-menu {
+  position: absolute;
+  top: 66px;
+  left: 24px;
+  z-index: 12;
+  width: min(320px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  box-sizing: border-box;
+}
+
+/* ---------------------------------------------------------------------------
+ * Animations
+ * ------------------------------------------------------------------------- */
+
+@keyframes studio-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Touch behavior — prevent the browser from hijacking widget drag gestures
+ * for scroll/zoom on mobile, and tighten down the canvas pan defaults.
+ * ------------------------------------------------------------------------- */
+
+.hermes-studio {
+  touch-action: pan-x pan-y;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.studio-widget-header,
+.studio-widget-resize {
+  touch-action: none; /* we handle drag/resize ourselves */
+}
+
+/* iOS Safari: prevent input-zoom by enforcing 16px font size on inputs */
+.studio-chat-input-field,
+.studio-chat-input-field input,
+.studio-chat-input-field textarea {
+  font-size: 16px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Chat panel — collapse/expand affordance for mobile
+ * ------------------------------------------------------------------------- */
+
+.studio-chat {
+  transition:
+    transform 240ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    opacity 200ms ease;
+}
+
+.studio-chat.is-collapsed {
+  transform: translateY(calc(100% - 52px));
+}
+
+.studio-chat.is-collapsed .studio-chat-body,
+.studio-chat.is-collapsed .studio-chat-attachments,
+.studio-chat.is-collapsed .studio-chat-input {
+  pointer-events: none;
+}
+
+.studio-chat-toggle {
+  background: transparent;
+  border: none;
+  color: var(--studio-text-fade);
+  cursor: pointer;
+  padding: 4px 8px;
+  margin-left: 4px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.studio-chat-toggle:hover,
+.studio-chat-toggle:focus-visible {
+  color: var(--studio-text);
+  outline: none;
+}
+
+.studio-chat-resize {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 2;
+  border-bottom-right-radius: 12px;
+  background: linear-gradient(135deg, transparent 0 42%, rgba(255, 255, 255, 0.06) 42% 100%);
+}
+
+.studio-chat-resize::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-left: 1px solid var(--studio-text-fade);
+  border-top: 1px solid var(--studio-text-fade);
+  opacity: 0.82;
+}
+
+/* ---------------------------------------------------------------------------
+ * Floating "open chat" button — only shown on mobile when chat is collapsed
+ * ------------------------------------------------------------------------- */
+
+.studio-chat-fab {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * Mobile (< 768px): chat as a bottom sheet, brand strip tighter
+ * ------------------------------------------------------------------------- */
+
+@media (max-width: 767px) {
+  .hermes-studio {
+    /* Respect the iPhone notch / home indicator. */
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  .studio-canvas {
+    /* Allow the canvas to scroll when the chat is collapsed so the user
+       can pan the widget grid by touch. */
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .studio-brand {
+    top: calc(12px + env(safe-area-inset-top, 0));
+    left: 12px;
+    right: 12px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .studio-live-pill {
+    top: calc(48px + env(safe-area-inset-top, 0));
+    left: 12px;
+  }
+
+  .studio-brand-mark {
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+  }
+
+  .studio-brand-sub {
+    display: none; /* save horizontal space on phone */
+  }
+
+  .studio-brand-back {
+    font-size: 0.6rem;
+    padding: 3px 8px;
+    min-height: 30px;
+  }
+
+  .studio-template-drawer,
+  .studio-annotation-panel,
+  .studio-options-menu {
+    top: calc(86px + env(safe-area-inset-top, 0));
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-height: min(64dvh, 560px);
+  }
+
+  .studio-template-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .studio-template-card button,
+  .studio-options-menu button {
+    min-height: 44px;
+  }
+
+  .studio-chat {
+    /* Bottom sheet: full width, attached to viewport bottom. */
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: min(72dvh, 560px);
+    max-height: min(72dvh, 560px);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  .studio-chat-header {
+    /* Make the whole header tappable as a collapse toggle on mobile. */
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .studio-chat-body {
+    /* Slightly tighter padding for phone screens. */
+    padding: 0 14px 10px;
+    min-height: 140px;
+  }
+
+  .studio-widget {
+    /* Smaller min-size on phones so widgets fit. */
+    min-width: 140px;
+    min-height: 100px;
+  }
+
+  .studio-widget-note-badge {
+    top: 7px;
+    right: 8px;
+  }
+
+  /* Show the FAB only when the chat is collapsed on mobile. */
+  .studio-chat.is-collapsed + .studio-chat-fab {
+    display: flex;
+  }
+
+  .studio-chat-fab {
+    position: fixed;
+    right: 14px;
+    bottom: calc(70px + env(safe-area-inset-bottom, 0));
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--studio-text);
+    align-items: center;
+    justify-content: center;
+    z-index: 11;
+    cursor: pointer;
+    box-shadow:
+      0 6px 18px rgba(0, 0, 0, 0.45),
+      inset 0 1px 1px rgba(255, 255, 255, 0.18);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@media (min-width: 768px) {
+  .studio-chat-header {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .studio-chat.is-collapsed {
+    transform: translateY(calc(100% - 48px));
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Zoom toolbar — minus / percent (resets) / plus
+ * ------------------------------------------------------------------------- */
+
+.studio-zoom-toolbar {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: stretch;
+  z-index: 10;
+  padding: 4px;
+  gap: 2px;
+  border-radius: 12px;
+  /* Inherits .studio-glass border + blur from the className combo. */
+}
+
+.studio-zoom-btn {
+  background: transparent;
+  border: none;
+  color: var(--studio-text-dim);
+  cursor: pointer;
+  width: 34px;
+  height: 28px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, "Inter", sans-serif;
+  letter-spacing: -0.02em;
+  transition:
+    color 120ms,
+    background 120ms;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.studio-zoom-btn:hover,
+.studio-zoom-btn:focus-visible {
+  color: var(--studio-text);
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+.studio-zoom-reset {
+  width: 56px;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 767px) {
+  .studio-zoom-toolbar {
+    left: 12px;
+    /* Sit above the bottom-sheet chat header when collapsed. */
+    bottom: calc(72px + env(safe-area-inset-bottom, 0));
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Chat attachment chips (file/image preview row above the textarea)
+ * ------------------------------------------------------------------------- */
+
+.studio-chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 16px 8px;
+}
+
+.studio-chat-attachments:empty {
+  display: none;
+}
+
+.studio-chat-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.7rem;
+  color: var(--studio-text-dim);
+  max-width: 160px;
+}
+
+.studio-chat-attachment-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--studio-text);
+}
+
+.studio-chat-attachment-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.studio-chat-attachment-remove {
+  background: transparent;
+  border: none;
+  color: var(--studio-text-fade);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.studio-chat-attachment-remove:hover {
+  color: var(--studio-signal);
+}
+
+.studio-chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.studio-chat-attach-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--studio-text-dim);
+  cursor: pointer;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color 120ms,
+    border-color 120ms,
+    background 120ms;
+}
+
+.studio-chat-attach-btn:hover,
+.studio-chat-attach-btn:focus-visible {
+  color: var(--studio-text);
+  border-color: rgba(255, 255, 255, 0.18);
+  outline: none;
+}

@@ -1,0 +1,201 @@
+cols: 5
+id: rickroll-player
+name: Rickroll
+renderer: |-
+  async (parent, runtime, ctx) => {
+    parent.style.cssText = 'display:flex;flex-direction:column;height:100%;background:#0f0f0f;border-radius:8px;overflow:hidden;';
+
+    const widgetId = String(ctx?.widget?.id || 'rickroll-player').trim() || 'rickroll-player';
+    const spaceId = String(ctx?.space?.id || '').trim();
+    const initialVideoId = '_6HzLIJPH2A';
+    const initialAutoplay = true;
+
+    const playerWrap = document.createElement('div');
+    playerWrap.style.cssText = 'flex:1;position:relative;background:#000;';
+    parent.appendChild(playerWrap);
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'yt-player-iframe-' + widgetId;
+    iframe.title = 'YouTube video player';
+    iframe.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border:none;';
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    playerWrap.appendChild(iframe);
+
+    let disposed = false;
+    let player = null;
+    let playerReady = false;
+    let pendingVideo = {
+      autoplay: initialAutoplay,
+      videoId: initialVideoId
+    };
+    let removingWidget = false;
+
+    function ensureYouTubeIframeApi() {
+      if (globalThis.YT?.Player) {
+        return Promise.resolve(globalThis.YT);
+      }
+
+      if (globalThis.__spaceYouTubeIframeApiPromise) {
+        return globalThis.__spaceYouTubeIframeApiPromise;
+      }
+
+      globalThis.__spaceYouTubeIframeApiPromise = new Promise((resolve, reject) => {
+        const previousReady = globalThis.onYouTubeIframeAPIReady;
+        let settled = false;
+
+        const resolveReady = () => {
+          if (settled || !globalThis.YT?.Player) {
+            return;
+          }
+
+          settled = true;
+          resolve(globalThis.YT);
+        };
+
+        globalThis.onYouTubeIframeAPIReady = () => {
+          try {
+            if (typeof previousReady === 'function') {
+              previousReady();
+            }
+          } catch (error) {
+            console.warn('Existing YouTube API ready handler failed.', error);
+          }
+
+          resolveReady();
+        };
+
+        const existingScript = document.querySelector('script[data-space-youtube-iframe-api="true"]');
+        if (!existingScript) {
+          const script = document.createElement('script');
+          script.src = 'https://www.youtube.com/iframe_api';
+          script.async = true;
+          script.dataset.spaceYoutubeIframeApi = 'true';
+          script.onerror = () => {
+            if (settled) {
+              return;
+            }
+
+            settled = true;
+            delete globalThis.__spaceYouTubeIframeApiPromise;
+            reject(new Error('Unable to load the YouTube IFrame API.'));
+          };
+          document.head.appendChild(script);
+        }
+
+        window.setTimeout(resolveReady, 0);
+      });
+
+      return globalThis.__spaceYouTubeIframeApiPromise;
+    }
+
+    function buildEmbedUrl(videoId, autoplay) {
+      const params = new URLSearchParams({
+        autoplay: autoplay ? '1' : '0',
+        enablejsapi: '1',
+        modestbranding: '1',
+        origin: globalThis.location?.origin || '',
+        playsinline: '1',
+        rel: '0'
+      });
+      return 'https://www.youtube.com/embed/' + encodeURIComponent(videoId) + '?' + params.toString();
+    }
+
+    function removeThisWidget() {
+      if (disposed || removingWidget || !spaceId || !widgetId || typeof ctx?.spaces?.removeWidget !== 'function') {
+        return;
+      }
+
+      removingWidget = true;
+      void ctx.spaces.removeWidget({
+        spaceId,
+        widgetId
+      }).catch((error) => {
+        removingWidget = false;
+        console.warn('Rickroll self-remove failed.', error);
+      });
+    }
+
+    function loadVideo(videoId, autoplay) {
+      const normalizedVideoId = String(videoId || '').trim();
+
+      if (!normalizedVideoId || disposed) {
+        return;
+      }
+
+      pendingVideo = {
+        autoplay: autoplay !== false,
+        videoId: normalizedVideoId
+      };
+      removingWidget = false;
+
+      if (player && playerReady) {
+        if (pendingVideo.autoplay) {
+          player.loadVideoById(normalizedVideoId);
+        } else {
+          player.cueVideoById(normalizedVideoId);
+        }
+        return;
+      }
+
+      iframe.src = buildEmbedUrl(normalizedVideoId, pendingVideo.autoplay);
+    }
+
+    const playerReadyPromise = ensureYouTubeIframeApi()
+      .then((YT) => {
+        if (disposed) {
+          return;
+        }
+
+        player = new YT.Player(iframe, {
+          events: {
+            onReady: () => {
+              playerReady = true;
+
+              if (!pendingVideo) {
+                return;
+              }
+
+              if (pendingVideo.autoplay) {
+                player.loadVideoById(pendingVideo.videoId);
+              } else {
+                player.cueVideoById(pendingVideo.videoId);
+              }
+            },
+            onStateChange: (event) => {
+              if (event?.data === YT.PlayerState.ENDED) {
+                removeThisWidget();
+              }
+            }
+          }
+        });
+      })
+      .catch((error) => {
+        console.warn('Rickroll player setup failed.', error);
+      });
+
+    loadVideo(initialVideoId, initialAutoplay);
+
+    const handler = (e) => {
+      const { videoId, autoplay } = e.detail || {};
+      if (videoId) loadVideo(videoId, autoplay !== false);
+    };
+    window.addEventListener('yt-play-video', handler);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('yt-play-video', handler);
+
+      void playerReadyPromise;
+
+      if (player && typeof player.destroy === 'function') {
+        player.destroy();
+        return;
+      }
+
+      iframe.src = 'about:blank';
+    };
+  }
+rows: 6
+schema: space-widget/v1

@@ -1,0 +1,14 @@
+{
+  "name": "studio",
+  "label": "Studio",
+  "description": "Hermes Studio canvas, widgets, live spaces, and presets as a dashboard plugin tab.",
+  "icon": "Sparkles",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/studio",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

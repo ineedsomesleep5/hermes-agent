@@ -1,0 +1,151 @@
+cols: 10
+id: yt-video-player
+name: YouTube Player
+renderer: |-
+  async (parent, space, ctx) => {
+    parent.style.cssText = `
+      display:flex;flex-direction:column;height:100%;box-sizing:border-box;
+      padding:12px;background:linear-gradient(145deg,#111,#070707);
+      color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      overflow:hidden;gap:10px;
+    `;
+
+    const state = {
+      videoId: 'dQw4w9WgXcQ',
+      title: 'YouTube Player',
+      channel: 'Ready',
+      loadedFromFeed: false,
+    };
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:10px;flex:0 0 auto;min-height:30px;';
+    const badge = document.createElement('div');
+    badge.textContent = 'YT';
+    badge.style.cssText = 'width:30px;height:22px;border-radius:7px;background:#ff0033;color:white;display:grid;place-items:center;font-weight:900;font-size:11px;letter-spacing:-0.04em;';
+    const copy = document.createElement('div');
+    copy.style.cssText = 'min-width:0;flex:1;';
+    const titleEl = document.createElement('div');
+    titleEl.style.cssText = 'font-size:13px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    const metaEl = document.createElement('div');
+    metaEl.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.52);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    copy.append(titleEl, metaEl);
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.textContent = 'Open';
+    openBtn.style.cssText = 'border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#fff;border-radius:9px;min-height:30px;padding:0 10px;font-size:11px;cursor:pointer;';
+    head.append(badge, copy, openBtn);
+
+    const frameWrap = document.createElement('div');
+    frameWrap.style.cssText = 'position:relative;flex:1 1 auto;min-height:0;background:#000;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);';
+    const iframe = document.createElement('iframe');
+    iframe.title = 'Hermes YouTube player';
+    iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;';
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    frameWrap.append(iframe);
+
+    const foot = document.createElement('div');
+    foot.style.cssText = 'display:flex;gap:8px;align-items:center;flex:0 0 auto;';
+    const input = document.createElement('input');
+    input.placeholder = 'Paste YouTube URL or video id';
+    input.style.cssText = 'flex:1;min-width:0;height:34px;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;padding:0 10px;font-size:12px;outline:none;';
+    const playBtn = document.createElement('button');
+    playBtn.type = 'button';
+    playBtn.textContent = 'Play';
+    playBtn.style.cssText = 'height:34px;border-radius:10px;border:1px solid rgba(255,0,51,0.42);background:rgba(255,0,51,0.18);color:#fff;padding:0 13px;font-weight:700;font-size:12px;cursor:pointer;';
+    foot.append(input, playBtn);
+    parent.append(head, frameWrap, foot);
+
+    const extractVideoId = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
+      try {
+        const url = new URL(raw);
+        if (url.hostname.includes('youtu.be')) return url.pathname.split('/').filter(Boolean)[0] || '';
+        if (url.searchParams.get('v')) return url.searchParams.get('v') || '';
+        const parts = url.pathname.split('/').filter(Boolean);
+        const idx = parts.findIndex((part) => ['embed', 'shorts', 'live'].includes(part));
+        if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+      } catch (_) {
+        const match = raw.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/);
+        if (match) return match[1];
+      }
+      return '';
+    };
+
+    const setStatus = () => {
+      titleEl.textContent = state.title || 'YouTube Player';
+      metaEl.textContent = state.loadedFromFeed ? state.channel : 'Paste a link or use the default video';
+      openBtn.onclick = () => window.open('https://www.youtube.com/watch?v=' + encodeURIComponent(state.videoId), '_blank', 'noopener,noreferrer');
+    };
+
+    const loadVideo = (videoId, title = '', autoplay = false, channel = '') => {
+      if (!videoId) return;
+      state.videoId = videoId;
+      state.title = title || 'YouTube Video';
+      state.channel = channel || 'youtube.com';
+      const params = new URLSearchParams({
+        autoplay: autoplay ? '1' : '0',
+        rel: '0',
+        modestbranding: '1',
+        playsinline: '1',
+      });
+      iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(videoId) + '?' + params.toString();
+      setStatus();
+    };
+
+    const playFromInput = () => {
+      const videoId = extractVideoId(input.value);
+      if (!videoId) {
+        metaEl.textContent = 'Could not read that YouTube URL/video id';
+        return;
+      }
+      loadVideo(videoId, 'Custom YouTube video', true);
+    };
+    playBtn.addEventListener('click', playFromInput);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') playFromInput();
+    });
+
+    const handler = (event) => {
+      const detail = event.detail || {};
+      if (detail.videoId) {
+        loadVideo(detail.videoId, detail.title || 'Selected video', detail.autoplay !== false, detail.channelName || detail.channel || '');
+      }
+    };
+    window.addEventListener('yt-play-video', handler);
+
+    loadVideo(state.videoId, 'YouTube Player', false);
+
+    try {
+      const channelId = 'UCm4Sy7W36u_ZFOZWX9cd07w';
+      const res = await space.fetchExternal('https://www.youtube.com/feeds/videos.xml?channel_id=' + channelId);
+      if (!res.ok) throw new Error('Feed request failed: HTTP ' + res.status);
+      const xmlText = await res.text();
+      const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+      const first = doc.querySelector('entry');
+      const id = first?.querySelector('videoId')?.textContent || '';
+      const title = first?.querySelector('title')?.textContent || 'Latest Agent Zero video';
+      const channel = first?.querySelector('author name')?.textContent || 'AgentZero';
+      if (id) {
+        state.loadedFromFeed = true;
+        loadVideo(id, title, false, channel);
+      }
+    } catch (err) {
+      console.warn('YouTube feed load failed; default video remains available.', err);
+      metaEl.textContent = 'Feed unavailable; paste any YouTube URL';
+    }
+
+    return {
+      cleanup: () => {
+        window.removeEventListener('yt-play-video', handler);
+        playBtn.removeEventListener('click', playFromInput);
+      },
+    };
+  }
+rows: 7
+schema: space-widget/v1
+col: -1
+row: 0

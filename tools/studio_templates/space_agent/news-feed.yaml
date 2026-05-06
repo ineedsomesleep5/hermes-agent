@@ -1,0 +1,292 @@
+cols: 5
+id: news-feed
+name: News Feed
+renderer: |-
+  async (parent, currentSpace) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: white;
+      border-radius: 24px;
+      overflow: hidden;
+      background: transparent;
+      position: relative;
+      user-select: none;
+    `
+
+    const style = document.createElement("style")
+    style.textContent = `
+      .news-root{position:relative;width:100%;height:100%;padding:6px 2px;box-sizing:border-box;display:grid;grid-template-rows:auto 1fr;gap:6px;overflow:hidden;}
+      .news-top{display:flex;justify-content:space-between;align-items:center;}
+      .news-title{font-size:18px;font-weight:700;letter-spacing:-0.02em;}
+      .news-actions{display:flex;gap:8px;}
+      .news-btn{width:32px;height:32px;border:none;border-radius:16px;background:rgba(255,255,255,.15);color:white;font-size:15px;backdrop-filter:blur(12px);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+      .news-list{overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:2px;}
+      .news-list::-webkit-scrollbar{width:3px;}
+      .news-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:2px;}
+      .news-item{padding:7px 8px;border-radius:10px;background:transparent;cursor:pointer;transition:background .15s;}
+      .news-item:hover{background:rgba(255,255,255,.08);}
+      .news-item-inner{display:flex;gap:10px;align-items:flex-start;}
+      .news-item-thumb{width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.08);}
+      .news-item-body{flex:1;min-width:0;}
+      .news-item-title{font-size:13px;font-weight:600;line-height:1.35;margin-bottom:3px;}
+      .news-item-meta{font-size:11px;opacity:.55;display:flex;gap:8px;}
+      .news-modal{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35);backdrop-filter:blur(8px);z-index:5;}
+      .news-modal-card{width:88%;max-width:300px;background:rgba(20,24,38,.97);border-radius:22px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,.4);}
+      .news-modal-title{font-size:15px;font-weight:700;margin-bottom:10px;}
+      .news-feed-option{padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.08);cursor:pointer;margin-bottom:6px;font-size:13px;transition:background .15s;}
+      .news-feed-option:hover{background:rgba(255,255,255,.16);}
+      .news-feed-option.active{background:rgba(95,185,255,.25);}
+      .news-custom-row{display:flex;gap:8px;margin-top:4px;}
+      .news-input{flex:1;border:none;border-radius:12px;padding:10px 12px;font-size:13px;outline:none;background:rgba(255,255,255,.12);color:white;}
+      .news-save{border:none;border-radius:12px;padding:10px 14px;background:#5fb9ff;color:white;cursor:pointer;font-size:13px;}
+      .news-close{border:none;border-radius:12px;padding:10px 14px;background:rgba(255,255,255,.14);color:white;cursor:pointer;font-size:13px;width:100%;margin-top:8px;}
+    `
+    parent.appendChild(style)
+
+    const FEEDS = [
+      { label: "BBC News", url: "https://feeds.bbci.co.uk/news/rss.xml" },
+      { label: "Hacker News", url: "https://hnrss.org/frontpage" },
+      { label: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
+      { label: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index" },
+      { label: "NPR News", url: "https://feeds.npr.org/1001/rss.xml" },
+      { label: "Reuters World", url: "https://feeds.reuters.com/reuters/worldNews" },
+      { label: "Wired", url: "https://www.wired.com/feed/rss" },
+      { label: "TechCrunch", url: "https://techcrunch.com/feed/" },
+    ]
+
+    async function fetchWithFallback(feedUrl) {
+      const res = await fetch(feedUrl, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) throw new Error("HTTP " + res.status)
+      return await res.text()
+    }
+
+    const state = { feedUrl: "", feedLabel: "News", items: [], loading: false, error: "" }
+
+    const root = document.createElement("div")
+    root.className = "news-root"
+    parent.appendChild(root)
+
+    const top = document.createElement("div")
+    top.className = "news-top"
+    root.appendChild(top)
+
+    const titleEl = document.createElement("div")
+    titleEl.className = "news-title"
+    titleEl.textContent = "News"
+    top.appendChild(titleEl)
+
+    const actions = document.createElement("div")
+    actions.className = "news-actions"
+    top.appendChild(actions)
+
+    const refreshBtn = document.createElement("button")
+    refreshBtn.className = "news-btn"
+    refreshBtn.textContent = "↻"
+    refreshBtn.title = "Refresh"
+    actions.appendChild(refreshBtn)
+
+    const cfgBtn = document.createElement("button")
+    cfgBtn.className = "news-btn"
+    cfgBtn.textContent = "⚙"
+    cfgBtn.title = "Choose feed"
+    actions.appendChild(cfgBtn)
+
+    const list = document.createElement("div")
+    list.className = "news-list"
+    root.appendChild(list)
+
+    const modal = document.createElement("div")
+    modal.className = "news-modal"
+    modal.innerHTML = `
+      <div class="news-modal-card">
+        <div class="news-modal-title">Choose feed</div>
+        <div id="feedOptions"></div>
+        <div class="news-custom-row">
+          <input id="customUrl" class="news-input" placeholder="Custom RSS URL…" />
+          <button id="customSave" class="news-save">Go</button>
+        </div>
+        <button id="modalClose" class="news-close">Close</button>
+      </div>
+    `
+    root.appendChild(modal)
+
+    const feedOptions = modal.querySelector("#feedOptions")
+    const customUrl = modal.querySelector("#customUrl")
+    const customSave = modal.querySelector("#customSave")
+    const modalClose = modal.querySelector("#modalClose")
+
+    function renderOptions() {
+      feedOptions.innerHTML = ""
+      FEEDS.forEach(f => {
+        const el = document.createElement("div")
+        el.className = "news-feed-option" + (state.feedUrl === f.url ? " active" : "")
+        el.textContent = f.label
+        el.onclick = async () => {
+          state.feedUrl = f.url
+          state.feedLabel = f.label
+          await savePrefs()
+          modal.style.display = "none"
+          await loadFeed()
+        }
+        feedOptions.appendChild(el)
+      })
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return ""
+      const d = new Date(dateStr)
+      if (isNaN(d)) return ""
+      const diff = Math.floor((Date.now() - d) / 60000)
+      if (diff < 1) return "just now"
+      if (diff < 60) return diff + "m ago"
+      if (diff < 1440) return Math.floor(diff / 60) + "h ago"
+      return Math.floor(diff / 1440) + "d ago"
+    }
+
+    function renderList() {
+      list.innerHTML = ""
+      if (state.loading) {
+        const el = document.createElement("div")
+        el.style.cssText = "padding:20px;text-align:center;opacity:.5;font-size:13px;"
+        el.textContent = "Loading…"
+        list.appendChild(el)
+        return
+      }
+      if (state.error) {
+        const el = document.createElement("div")
+        el.style.cssText = "padding:20px;text-align:center;opacity:.6;font-size:13px;"
+        el.textContent = state.error
+        list.appendChild(el)
+        return
+      }
+      if (!state.items.length) {
+        const el = document.createElement("div")
+        el.style.cssText = "padding:20px;text-align:center;opacity:.5;font-size:13px;"
+        el.textContent = "No items found."
+        list.appendChild(el)
+        return
+      }
+      state.items.forEach(item => {
+        const el = document.createElement("div")
+        el.className = "news-item"
+        const inner = document.createElement("div")
+        inner.className = "news-item-inner"
+        if (item.thumb) {
+          const img = document.createElement("img")
+          img.className = "news-item-thumb"
+          img.src = item.thumb
+          img.alt = ""
+          img.onerror = () => { img.style.display = "none" }
+          inner.appendChild(img)
+        }
+        const body = document.createElement("div")
+        body.className = "news-item-body"
+        body.innerHTML = `
+          <div class="news-item-title">${item.title}</div>
+          <div class="news-item-meta">
+            ${item.category ? `<span>${item.category}</span>` : ""}
+            ${item.date ? `<span>${timeAgo(item.date)}</span>` : ""}
+          </div>
+        `
+        inner.appendChild(body)
+        el.appendChild(inner)
+        el.onclick = () => window.open(item.link, "_blank")
+        list.appendChild(el)
+      })
+    }
+
+    async function loadFeed() {
+      state.loading = true
+      state.error = ""
+      titleEl.textContent = state.feedLabel
+      renderList()
+      try {
+        const text = await fetchWithFallback(state.feedUrl)
+        const parser = new DOMParser()
+        const doc = parser.parseFromString(text, "text/xml")
+        const items = [...doc.querySelectorAll("item, entry")]
+        state.items = items.slice(0, 30).map(it => {
+          const title = it.querySelector("title")?.textContent?.trim() || "Untitled"
+          const link = it.querySelector("link")?.textContent?.trim() || it.querySelector("link")?.getAttribute("href") || "#"
+          const date = it.querySelector("pubDate, published, updated")?.textContent?.trim() || ""
+          let thumb = ""
+          const mediaThumb = it.querySelector("thumbnail")
+          if (mediaThumb) thumb = mediaThumb.getAttribute("url") || ""
+          if (!thumb) {
+            const mediaContent = it.querySelector("content")
+            if (mediaContent) thumb = mediaContent.getAttribute("url") || ""
+          }
+          if (!thumb) {
+            const enc = it.querySelector("enclosure")
+            if (enc && enc.getAttribute("type")?.startsWith("image")) thumb = enc.getAttribute("url") || ""
+          }
+          if (!thumb) {
+            const desc = it.querySelector("description, summary")?.textContent || ""
+            const m = desc.match(/<img[^>]+src=["']([^"']+)["']/i)
+            if (m) thumb = m[1]
+          }
+          const category = it.querySelector("category")?.textContent?.trim() || it.querySelector("category")?.getAttribute("term")?.trim() || ""
+          return { title, link, date, thumb, category }
+        })
+        state.loading = false
+        renderList()
+      } catch (e) {
+        state.loading = false
+        state.error = "Failed to load feed."
+        renderList()
+      }
+    }
+
+    async function savePrefs() {
+      await currentSpace.api.fileWrite("~/news-feed-prefs.json", JSON.stringify({ feedUrl: state.feedUrl, feedLabel: state.feedLabel }), "utf8").catch(() => {})
+    }
+
+    async function loadPrefs() {
+      try {
+        const raw = await currentSpace.api.fileRead("~/news-feed-prefs.json", "utf8")
+        const p = JSON.parse(raw)
+        if (p.feedUrl) { state.feedUrl = p.feedUrl; state.feedLabel = p.feedLabel || "News" }
+      } catch {}
+    }
+
+    cfgBtn.onclick = () => {
+      renderOptions()
+      customUrl.value = ""
+      modal.style.display = "flex"
+    }
+
+    modalClose.onclick = () => { modal.style.display = "none" }
+
+    refreshBtn.onclick = () => loadFeed()
+
+    customSave.onclick = async () => {
+      const v = customUrl.value.trim()
+      if (!v) return
+      state.feedUrl = v
+      state.feedLabel = "Custom"
+      await savePrefs()
+      modal.style.display = "none"
+      await loadFeed()
+    }
+
+    await loadPrefs()
+    if (!state.feedUrl) {
+      state.feedUrl = FEEDS[0].url
+      state.feedLabel = FEEDS[0].label
+    }
+    await loadFeed()
+
+    return () => {
+      cfgBtn.onclick = null
+      refreshBtn.onclick = null
+      modalClose.onclick = null
+      customSave.onclick = null
+    }
+  }
+rows: 7
+schema: space-widget/v1

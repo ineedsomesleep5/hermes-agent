@@ -1,0 +1,324 @@
+cols: 8
+id: crypto-prices
+name: Crypto Prices
+renderer: |-
+  async (parent) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
+      color: #baff8d;
+      font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      background: #050805;
+      border-radius: 18px;
+      position: relative;
+    `
+
+    const style = document.createElement("style")
+    style.textContent = `
+      .crypto-ticker-root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 10px;
+        padding: 10px 14px;
+        box-sizing: border-box;
+        overflow: hidden;
+        border: 1px solid rgba(145, 255, 117, 0.14);
+        border-radius: 18px;
+        background:
+          radial-gradient(circle at top left, rgba(105, 255, 127, 0.12), transparent 40%),
+          linear-gradient(180deg, #111710 0%, #050805 100%);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.03),
+          inset 0 -10px 24px rgba(0, 0, 0, 0.32);
+      }
+
+      .crypto-ticker-root::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background:
+          repeating-linear-gradient(90deg, rgba(180, 255, 160, 0.04) 0 2px, transparent 2px 11px),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 24%, transparent 76%, rgba(0, 0, 0, 0.24));
+      }
+
+      .crypto-ticker-top {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        min-width: 0;
+        font-size: 0.66rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: rgba(214, 255, 200, 0.76);
+      }
+
+      .crypto-ticker-live {
+        color: #ff866f;
+        text-shadow: 0 0 10px rgba(255, 134, 111, 0.28);
+      }
+
+      .crypto-ticker-time {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .crypto-ticker-viewport {
+        position: relative;
+        z-index: 1;
+        min-width: 0;
+        overflow: hidden;
+        align-self: center;
+        -webkit-mask-image: linear-gradient(to right, transparent, black 6%, black 94%, transparent);
+        mask-image: linear-gradient(to right, transparent, black 6%, black 94%, transparent);
+      }
+
+      .crypto-ticker-track {
+        display: flex;
+        align-items: center;
+        width: max-content;
+        white-space: nowrap;
+        animation: crypto-ticker-scroll 28s linear infinite;
+        will-change: transform;
+      }
+
+      .crypto-ticker-sequence {
+        display: flex;
+        align-items: center;
+        gap: 2.35rem;
+        padding-right: 2.35rem;
+      }
+
+      .crypto-ticker-item {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 0.72rem;
+        font-size: 1rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #baff8d;
+        text-shadow: 0 0 10px rgba(92, 255, 120, 0.18);
+      }
+
+      .crypto-ticker-symbol {
+        font-weight: 700;
+        color: #f0ffd8;
+      }
+
+      .crypto-ticker-price {
+        font-weight: 700;
+      }
+
+      .crypto-ticker-change {
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+
+      .crypto-ticker-change.is-up {
+        color: #86ff77;
+      }
+
+      .crypto-ticker-change.is-down {
+        color: #ff8b75;
+      }
+
+      .crypto-ticker-divider {
+        color: rgba(188, 255, 171, 0.34);
+      }
+
+      .crypto-ticker-status {
+        font-size: 0.92rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(230, 255, 224, 0.72);
+      }
+
+      @keyframes crypto-ticker-scroll {
+        from {
+          transform: translateX(0);
+        }
+
+        to {
+          transform: translateX(-50%);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .crypto-ticker-track {
+          animation: none;
+        }
+      }
+    `
+    parent.appendChild(style)
+
+    const root = document.createElement("div")
+    root.className = "crypto-ticker-root"
+    parent.appendChild(root)
+
+    const header = document.createElement("div")
+    header.className = "crypto-ticker-top"
+    header.innerHTML = `
+      <span class="crypto-ticker-live">Markets Live</span>
+      <span class="crypto-ticker-time">Loading ticker</span>
+    `
+    root.appendChild(header)
+
+    const headerTime = header.querySelector(".crypto-ticker-time")
+
+    const viewport = document.createElement("div")
+    viewport.className = "crypto-ticker-viewport"
+    root.appendChild(viewport)
+
+    const track = document.createElement("div")
+    track.className = "crypto-ticker-track"
+    viewport.appendChild(track)
+
+    const sequenceA = document.createElement("div")
+    sequenceA.className = "crypto-ticker-sequence"
+    track.appendChild(sequenceA)
+
+    const sequenceB = document.createElement("div")
+    sequenceB.className = "crypto-ticker-sequence"
+    track.appendChild(sequenceB)
+
+    const COINS = [
+      { id: "bitcoin", symbol: "BTC" },
+      { id: "ethereum", symbol: "ETH" },
+      { id: "solana", symbol: "SOL" },
+      { id: "binancecoin", symbol: "BNB" },
+      { id: "ripple", symbol: "XRP" },
+      { id: "dogecoin", symbol: "DOGE" },
+      { id: "cardano", symbol: "ADA" }
+    ]
+
+    function formatPrice(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return "--"
+      if (number >= 1000) return `$${number.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      if (number >= 1) return `$${number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      return `$${number.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 })}`
+    }
+
+    function formatChange(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) {
+        return { direction: "flat", text: "--.--%" }
+      }
+      const direction = number >= 0 ? "up" : "down"
+      return {
+        direction,
+        text: `${number >= 0 ? "+" : "-"}${Math.abs(number).toFixed(2)}%`
+      }
+    }
+
+    function createTickerItem(coin) {
+      const item = document.createElement("div")
+      item.className = "crypto-ticker-item"
+
+      const symbol = document.createElement("span")
+      symbol.className = "crypto-ticker-symbol"
+      symbol.textContent = coin.symbol
+      item.appendChild(symbol)
+
+      const price = document.createElement("span")
+      price.className = "crypto-ticker-price"
+      price.textContent = formatPrice(coin.price)
+      item.appendChild(price)
+
+      const change = document.createElement("span")
+      const changeData = formatChange(coin.change)
+      change.className = `crypto-ticker-change ${
+        changeData.direction === "up"
+          ? "is-up"
+          : changeData.direction === "down"
+            ? "is-down"
+            : ""
+      }`.trim()
+      change.textContent = changeData.text
+      item.appendChild(change)
+
+      return item
+    }
+
+    function renderTickerRows(coins) {
+      sequenceA.replaceChildren()
+      sequenceB.replaceChildren()
+
+      const renderSequence = (target) => {
+        coins.forEach((coin, index) => {
+          target.appendChild(createTickerItem(coin))
+          if (index < coins.length - 1) {
+            const divider = document.createElement("span")
+            divider.className = "crypto-ticker-divider"
+            divider.textContent = "•"
+            target.appendChild(divider)
+          }
+        })
+      }
+
+      renderSequence(sequenceA)
+      renderSequence(sequenceB)
+    }
+
+    function renderStatus(message) {
+      sequenceA.replaceChildren()
+      sequenceB.replaceChildren()
+
+      const statusA = document.createElement("div")
+      statusA.className = "crypto-ticker-status"
+      statusA.textContent = message
+      sequenceA.appendChild(statusA)
+
+      const statusB = document.createElement("div")
+      statusB.className = "crypto-ticker-status"
+      statusB.textContent = message
+      sequenceB.appendChild(statusB)
+    }
+
+    async function updatePrices() {
+      renderStatus("Loading crypto tape")
+      headerTime.textContent = "Refreshing prices"
+
+      try {
+        const ids = COINS.map((coin) => coin.id).join(",")
+        const response = await space.fetchExternal(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+        const data = await response.json()
+        const coins = COINS.map((coin) => ({
+          ...coin,
+          change: data?.[coin.id]?.usd_24h_change,
+          price: data?.[coin.id]?.usd
+        }))
+
+        renderTickerRows(coins)
+        headerTime.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      } catch (error) {
+        console.error("[spaces/onboarding/crypto-prices] unable to load ticker", error)
+        renderStatus("Ticker offline")
+        headerTime.textContent = "Feed unavailable"
+      }
+    }
+
+    await updatePrices()
+    const timer = window.setInterval(() => {
+      void updatePrices()
+    }, 60000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }
+rows: 2
+schema: space-widget/v1

@@ -92,6 +92,12 @@ export default defineConfig({
   build: {
     outDir: "../hermes_cli/web_dist",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        studio: path.resolve(__dirname, "studio.html")
+      }
+    }
   },
   server: {
     proxy: {

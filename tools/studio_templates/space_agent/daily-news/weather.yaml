@@ -1,0 +1,331 @@
+cols: 5
+id: weather
+name: Weather
+renderer: |-
+  async (parent, currentSpace) => {
+      parent.style.cssText = `
+        all: initial;
+        display: block;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: white;
+        border-radius: 24px;
+        overflow: hidden;
+        background: linear-gradient(180deg, #5fb9ff 0%, #4a7dff 45%, #2d3d8f 100%);
+        position: relative;
+        user-select: none;
+      `
+
+      const style = document.createElement("style")
+      style.textContent = `
+        .weather-root{position:relative;width:100%;height:100%;padding:14px;box-sizing:border-box;display:grid;grid-template-rows:auto 1fr;gap:12px;overflow:hidden;}
+        .weather-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}
+        .weather-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+        .weather-main{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:10px;align-items:stretch;min-height:0;}
+        .weather-chip{padding:12px;border-radius:18px;background:rgba(255,255,255,.14);backdrop-filter:blur(14px);display:grid;gap:4px;min-width:0;align-content:center;justify-items:center;}
+        .weather-chip.big{min-height:110px;}
+        .weather-chip .label{font-size:10px;opacity:.8;}
+        .weather-chip .value{font-size:16px;font-weight:700;line-height:1.1;overflow-wrap:anywhere;text-align:center;}
+        .weather-chip .icon{font-size:56px;line-height:1;}
+        .weather-chip .temp{font-size:56px;font-weight:300;line-height:0.95;letter-spacing:-0.06em;}
+        .weather-modal{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.28);backdrop-filter:blur(8px);z-index:5;}
+        .weather-modal-card{width:88%;max-width:280px;background:rgba(20,24,38,.95);border-radius:22px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,.35)}
+      `
+      parent.appendChild(style)
+
+      const root = document.createElement("div")
+      root.className = "weather-root"
+      parent.appendChild(root)
+
+      const top = document.createElement("div")
+      top.className = "weather-top"
+      root.appendChild(top)
+
+      const locationWrap = document.createElement("div")
+      top.appendChild(locationWrap)
+
+      const place = document.createElement("div")
+      place.style.cssText = "font-size:26px;font-weight:700;line-height:1.1;letter-spacing:-0.03em;"
+      place.textContent = "Loading…"
+      locationWrap.appendChild(place)
+
+      const detail = document.createElement("div")
+      detail.style.cssText = "margin-top:4px;font-size:13px;opacity:.85;"
+      detail.textContent = "Weather"
+      locationWrap.appendChild(detail)
+
+      const actions = document.createElement("div")
+      actions.className = "weather-actions"
+      top.appendChild(actions)
+
+      const cfgBtn = document.createElement("button")
+      cfgBtn.textContent = "⚙"
+      cfgBtn.title = "Configure location"
+      cfgBtn.style.cssText = `
+        width:38px;height:38px;border:none;border-radius:19px;
+        background: rgba(255,255,255,.18); color:white; font-size:18px;
+        backdrop-filter: blur(12px); cursor:pointer;
+      `
+      actions.appendChild(cfgBtn)
+
+
+
+      const hero = document.createElement("div")
+      hero.className = "weather-main"
+      root.appendChild(hero)
+
+      const left = hero
+
+      const icon = document.createElement("div")
+      icon.className = "icon"
+      icon.textContent = "☀️"
+
+      const temp = document.createElement("div")
+      temp.className = "temp"
+      temp.textContent = "--°"
+
+      const desc = document.createElement("div")
+      desc.className = "value"
+      desc.textContent = "Fetching weather…"
+
+      const iconCard = document.createElement("div")
+      iconCard.className = "weather-chip big"
+      iconCard.append(icon)
+      // no label for icon
+
+      const tempCard = document.createElement("div")
+      tempCard.className = "weather-chip big"
+      tempCard.append(temp)
+      // no label for temp
+
+      const descCard = document.createElement("div")
+      descCard.className = "weather-chip big"
+      descCard.append(desc)
+
+      left.append(iconCard, tempCard, descCard)
+
+      const card = hero
+
+      const mkStat = (label, value) => {
+        const d = document.createElement("div")
+        d.className = "weather-chip"
+        const l = document.createElement("div")
+        l.className = "label"
+        l.textContent = label
+        const v = document.createElement("div")
+        v.className = "value"
+        v.textContent = value
+        d.append(l, v)
+        return { d, v }
+      }
+
+      const t1 = mkStat("Feels like", "--°")
+      const t2 = mkStat("Wind", "--")
+      const t3 = mkStat("Humidity", "--")
+      card.append(t1.d, t2.d, t3.d)
+
+      const modal = document.createElement("div")
+      modal.className = "weather-modal"
+      modal.innerHTML = `
+        <div class="weather-modal-card">
+          <div style="font-size:16px;font-weight:700;margin-bottom:10px">Set location</div>
+          <input id="cityInput" placeholder="City, zip, or address" style="width:100%;box-sizing:border-box;border:none;border-radius:14px;padding:12px 14px;font-size:14px;outline:none;margin-bottom:10px;background:rgba(255,255,255,.12);color:white;" />
+          <div style="margin-bottom:10px">
+            <button id="useLocationBtn" style="width:100%;border:none;border-radius:14px;padding:10px 14px;background:rgba(255,255,255,.14);color:white;cursor:pointer;font-size:13px">📍 Use my location</button>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button id="cancelBtn" style="border:none;border-radius:14px;padding:10px 14px;background:rgba(255,255,255,.14);color:white;cursor:pointer">Cancel</button>
+            <button id="saveBtn" style="border:none;border-radius:14px;padding:10px 14px;background:#5fb9ff;color:white;cursor:pointer">Save</button>
+          </div>
+        </div>
+      `
+      root.appendChild(modal)
+
+      const DEFAULT_LOCATION = {
+        city: "London, England",
+        latitude: 51.5072,
+        longitude: -0.1276
+      }
+      const LOCATION_MODE_STORAGE_KEY = "daily-news-weather-location-mode"
+      const LOCATION_FILE_PATH = "~/daily-news-weather-location.txt"
+
+      const state = { loading: false, error: "", city: "", coords: null, locationMode: "", data: null }
+
+      const cityInput = modal.querySelector("#cityInput")
+      const cancelBtn = modal.querySelector("#cancelBtn")
+      const saveBtn = modal.querySelector("#saveBtn")
+      const useLocationBtn = modal.querySelector("#useLocationBtn")
+
+      const iconFor = (code) => {
+        if (code === 0) return "☀️"
+        if ([1, 2].includes(code)) return "🌤️"
+        if ([3].includes(code)) return "☁️"
+        if ([45, 48].includes(code)) return "🌫️"
+        if ([51, 53, 55, 61, 63, 65, 80, 81, 82].includes(code)) return "🌧️"
+        if ([71, 73, 75, 77, 85, 86].includes(code)) return "❄️"
+        if ([95, 96, 99].includes(code)) return "⛈️"
+        return "🌡️"
+      }
+
+      async function geocodeCity(q) {
+        const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1&language=en&format=json`
+        const j = await fetch(url).then(r => r.json())
+        const r = j.results?.[0]
+        if (!r) throw new Error("Location not found")
+        return { latitude: r.latitude, longitude: r.longitude, label: `${r.name}${r.admin1 ? ", " + r.admin1 : ""}${r.country ? ", " + r.country : ""}` }
+      }
+
+      async function reverseGeocode(latitude, longitude) {
+        const url = `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude}&longitude=${longitude}&count=1&language=en&format=json`
+        const j = await fetch(url).then(r => r.json())
+        const r = j.results?.[0]
+        if (!r) return "Current location"
+        return `${r.name}${r.admin1 ? ", " + r.admin1 : ""}${r.country ? ", " + r.country : ""}`
+      }
+
+      function saveLocationMode(mode) {
+        state.locationMode = mode
+        localStorage.setItem(LOCATION_MODE_STORAGE_KEY, mode)
+      }
+
+      function readLocationMode() {
+        return localStorage.getItem(LOCATION_MODE_STORAGE_KEY) || ""
+      }
+
+      async function loadByCoords(latitude, longitude, label) {
+        state.loading = true
+        state.error = ""
+        place.textContent = label || "Loading…"
+        detail.textContent = "Updating…"
+        const url = `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${latitude}&lon=${longitude}`
+        const res = await fetch(url, { headers: { "User-Agent": "space-widget-weather" } })
+        const j = await res.json()
+        if (!res.ok) throw new Error(j?.detail || `Weather request failed`)
+        const t = j?.properties?.timeseries?.[0]
+        const instant = t?.data?.instant?.details || {}
+        const next = t?.data?.next_1_hours?.summary?.symbol_code || t?.data?.next_6_hours?.summary?.symbol_code || "unknown"
+        const code = next
+        const weatherText = code.includes("clear") ? "Clear"
+          : code.includes("partly") ? "Partly cloudy"
+          : code.includes("cloud") ? "Cloudy"
+          : code.includes("rain") ? "Rainy"
+          : code.includes("sleet") ? "Sleet"
+          : code.includes("snow") ? "Snowy"
+          : code.includes("fog") ? "Foggy"
+          : code.includes("thunder") ? "Stormy"
+          : "Weather"
+        state.data = j
+        place.textContent = label || "Current location"
+        temp.textContent = `${Math.round(instant.air_temperature ?? 0)}°`
+        desc.textContent = weatherText
+        icon.textContent = iconFor(
+          code.includes("clear") ? 0 : code.includes("partly") ? 1 : code.includes("cloud") ? 3 : code.includes("fog") ? 45 : code.includes("snow") ? 71 : code.includes("rain") ? 61 : code.includes("thunder") ? 95 : 0
+        )
+        detail.textContent = `Updated just now`
+        t1.v.textContent = `${Math.round(instant.air_temperature ?? 0)}°`
+        t2.v.textContent = `${Math.round(instant.wind_speed ?? 0)} km/h`
+        t3.v.textContent = `${Math.round(instant.relative_humidity ?? 0)}%`
+        state.loading = false
+      }
+
+      async function useBrowserLocation() {
+        detail.textContent = "Getting your location…"
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 })
+        )
+        state.coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude }
+        const label = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
+        saveLocationMode("current")
+        await space.api.fileWrite(LOCATION_FILE_PATH, "current", "utf8")
+        await loadByCoords(pos.coords.latitude, pos.coords.longitude, label)
+      }
+
+      async function run() {
+        try {
+          const savedMode = readLocationMode()
+          const saved = await space.api.fileRead(LOCATION_FILE_PATH, "utf8").catch(() => "")
+          const savedCity = typeof saved === "string" ? saved.trim() : ""
+          if (savedMode === "current" || savedCity === "current") {
+            await useBrowserLocation()
+            return
+          }
+          if (savedCity) {
+            state.city = savedCity
+            saveLocationMode("city")
+            const geo = await geocodeCity(state.city)
+            await loadByCoords(geo.latitude, geo.longitude, geo.label)
+            return
+          }
+          state.city = DEFAULT_LOCATION.city
+          saveLocationMode("default")
+          await loadByCoords(DEFAULT_LOCATION.latitude, DEFAULT_LOCATION.longitude, DEFAULT_LOCATION.city)
+        } catch (e) {
+          state.error = e?.message || "Unable to load weather"
+          place.textContent = "Weather"
+          temp.textContent = "--°"
+          desc.textContent = state.error
+          detail.textContent = state.error
+        }
+      }
+
+      cfgBtn.onclick = () => {
+        cityInput.value = state.city
+        modal.style.display = "flex"
+        cityInput.focus()
+      }
+
+      cancelBtn.onclick = () => {
+        modal.style.display = "none"
+      }
+
+      saveBtn.onclick = async () => {
+        const value = cityInput.value.trim()
+        modal.style.display = "none"
+        if (!value) {
+          saveLocationMode("default")
+          await space.api.fileWrite(LOCATION_FILE_PATH, "", "utf8")
+          state.city = DEFAULT_LOCATION.city
+          try {
+            await loadByCoords(DEFAULT_LOCATION.latitude, DEFAULT_LOCATION.longitude, DEFAULT_LOCATION.city)
+          } catch (e) {
+            desc.textContent = e?.message || "Unable to load weather"
+          }
+          return
+        }
+        saveLocationMode("city")
+        await space.api.fileWrite(LOCATION_FILE_PATH, value, "utf8")
+        state.city = value
+        try {
+          const geo = await geocodeCity(value)
+          await loadByCoords(geo.latitude, geo.longitude, geo.label)
+        } catch (e) {
+          desc.textContent = e?.message || "Location not found"
+        }
+      }
+
+      useLocationBtn.onclick = async () => {
+        modal.style.display = "none"
+        state.city = ""
+        desc.textContent = "Using browser location…"
+        try {
+          await useBrowserLocation()
+        } catch (e) {
+          desc.textContent = e?.message || "Location permission denied"
+        }
+      }
+
+      run()
+
+      return () => {
+        cfgBtn.onclick = null
+        useLocationBtn.onclick = null
+        saveBtn.onclick = null
+        cancelBtn.onclick = null
+      }
+    }
+rows: 4
+schema: space-widget/v1
+col: 0
+row: 0

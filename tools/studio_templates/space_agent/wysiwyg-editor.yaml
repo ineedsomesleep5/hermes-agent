@@ -1,0 +1,694 @@
+cols: 11
+id: wysiwyg-editor
+name: WYSIWYG Editor
+renderer: |-
+  async (parent, currentSpace, ctx) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
+      color: #eaf2ff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: transparent;
+      border-radius: 22px;
+      position: relative;
+    `
+
+    const style = document.createElement("style")
+    style.textContent = `
+      .editor-demo-root {
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        gap: 12px;
+        padding: 16px;
+        border-radius: 22px;
+        border: none;
+        background: transparent;
+        box-shadow: none;
+      }
+
+      .editor-demo-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+        min-width: 0;
+      }
+
+      .editor-demo-label {
+        font-size: 0.72rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(202, 220, 255, 0.66);
+      }
+
+      .editor-demo-title {
+        margin-top: 10px;
+        font-size: 1.35rem;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        color: #f7fbff;
+      }
+
+      .editor-demo-status {
+        flex-shrink: 0;
+        padding-top: 12px;
+        max-width: 240px;
+        text-align: right;
+        font-size: 0.78rem;
+        line-height: 1.4;
+        color: rgba(205, 220, 255, 0.7);
+      }
+
+      .editor-demo-controls {
+        display: grid;
+        gap: 10px;
+      }
+
+      .editor-demo-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .editor-demo-input {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid rgba(166, 197, 255, 0.16);
+        background: rgba(8, 15, 28, 0.5);
+        color: #f6fbff;
+        border-radius: 14px;
+        padding: 11px 14px;
+        font-size: 0.95rem;
+        outline: none;
+      }
+
+      .editor-demo-toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .editor-demo-btn {
+        border: 1px solid rgba(166, 197, 255, 0.14);
+        background: rgba(8, 15, 28, 0.54);
+        color: #ebf4ff;
+        border-radius: 12px;
+        padding: 9px 12px;
+        font-size: 0.85rem;
+        line-height: 1;
+        cursor: pointer;
+        transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+      }
+
+      .editor-demo-btn:hover {
+        background: rgba(27, 44, 79, 0.8);
+        border-color: rgba(140, 183, 255, 0.3);
+      }
+
+      .editor-demo-btn:active {
+        transform: translateY(1px);
+      }
+
+      .editor-demo-btn.is-accent {
+        background: rgba(122, 178, 255, 0.18);
+        border-color: rgba(140, 183, 255, 0.28);
+      }
+
+      .editor-demo-main {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 230px;
+        gap: 12px;
+      }
+
+      .editor-demo-page-wrap {
+        min-width: 0;
+        min-height: 0;
+        padding: 14px;
+        border-radius: 18px;
+        background: rgba(6, 12, 24, 0.48);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        overflow: auto;
+      }
+
+      .editor-demo-page {
+        width: min(100%, 720px);
+        min-height: 100%;
+        margin: 0 auto;
+        box-sizing: border-box;
+        padding: 30px 34px 34px;
+        border-radius: 18px;
+        background: #ffffff;
+        color: #1e2838;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.2);
+        outline: none;
+        overflow-wrap: anywhere;
+      }
+
+      .editor-demo-page:empty::before {
+        content: attr(data-placeholder);
+        color: rgba(30, 40, 56, 0.42);
+      }
+
+      .editor-demo-page h1,
+      .editor-demo-page h2,
+      .editor-demo-page h3 {
+        color: #10182a;
+        margin: 0 0 0.7em;
+        letter-spacing: -0.03em;
+      }
+
+      .editor-demo-page p,
+      .editor-demo-page ul,
+      .editor-demo-page ol,
+      .editor-demo-page blockquote {
+        margin: 0 0 1em;
+      }
+
+      .editor-demo-page blockquote {
+        border-left: 4px solid #94b9ff;
+        padding-left: 16px;
+        color: #40526f;
+      }
+
+      .editor-demo-sidebar {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 10px;
+        padding: 14px;
+        border-radius: 18px;
+        background: rgba(6, 12, 24, 0.48);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .editor-demo-sidebar-title {
+        margin-top: 6px;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: #f4f8ff;
+      }
+
+      .editor-demo-doc-list {
+        min-height: 0;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .editor-demo-doc-list::-webkit-scrollbar,
+      .editor-demo-page-wrap::-webkit-scrollbar {
+        width: 4px;
+      }
+
+      .editor-demo-doc-list::-webkit-scrollbar-thumb,
+      .editor-demo-page-wrap::-webkit-scrollbar-thumb {
+        background: rgba(180, 202, 255, 0.2);
+        border-radius: 999px;
+      }
+
+      .editor-demo-doc-card {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 12px;
+        background: rgba(19, 31, 56, 0.84);
+        border: 1px solid rgba(166, 197, 255, 0.08);
+      }
+
+      .editor-demo-doc-name {
+        min-width: 0;
+        display: block;
+        width: 100%;
+        padding: 6px 8px;
+        border: none;
+        background: transparent;
+        text-align: left;
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: #f5f9ff;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+        border-radius: 8px;
+        transition: background 0.14s ease, color 0.14s ease;
+      }
+
+      .editor-demo-doc-name:hover {
+        background: rgba(33, 53, 95, 0.7);
+        color: #ffffff;
+      }
+
+      .editor-demo-doc-actions {
+        display: flex;
+        gap: 6px;
+      }
+
+      .editor-demo-doc-actions .editor-demo-btn {
+        min-width: 34px;
+        padding: 6px 8px;
+        font-size: 0.72rem;
+      }
+
+      .editor-demo-doc-actions .editor-demo-btn.is-danger:hover {
+        background: rgba(106, 34, 43, 0.88);
+        border-color: rgba(255, 137, 145, 0.24);
+      }
+
+      .editor-demo-empty {
+        padding: 16px 10px;
+        text-align: center;
+        font-size: 0.82rem;
+        color: rgba(203, 219, 255, 0.58);
+      }
+
+      @media (max-width: 760px) {
+        .editor-demo-main {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .editor-demo-sidebar {
+          grid-template-rows: auto minmax(140px, 1fr);
+        }
+      }
+    `
+    parent.appendChild(style)
+
+    const root = document.createElement("div")
+    root.className = "editor-demo-root"
+    root.innerHTML = `
+      <div class="editor-demo-head">
+        <div>
+          <div class="editor-demo-label">Document Studio</div>
+          <div class="editor-demo-title">WYSIWYG Editor</div>
+        </div>
+        <div class="editor-demo-status" data-role="status">Rich text, Word docs, and PDF / Print.</div>
+      </div>
+      <div class="editor-demo-controls">
+        <div class="editor-demo-title-row">
+          <input class="editor-demo-input" data-role="title" placeholder="Document title" />
+          <button class="editor-demo-btn" data-role="new-doc">New File</button>
+          <button class="editor-demo-btn is-accent" data-role="save-doc">Save .doc</button>
+          <button class="editor-demo-btn" data-role="print-doc">PDF / Print</button>
+        </div>
+        <div class="editor-demo-toolbar" data-role="toolbar"></div>
+      </div>
+      <div class="editor-demo-main">
+        <div class="editor-demo-page-wrap">
+          <div
+            class="editor-demo-page"
+            contenteditable="true"
+            spellcheck="true"
+            data-role="editor"
+            data-placeholder="Start typing here…"
+          ></div>
+        </div>
+        <div class="editor-demo-sidebar">
+          <div class="editor-demo-sidebar-title">Stored Word Docs</div>
+          <div class="editor-demo-doc-list" data-role="docs-list"></div>
+        </div>
+      </div>
+    `
+    parent.appendChild(root)
+
+    const titleInput = root.querySelector("[data-role='title']")
+    const statusEl = root.querySelector("[data-role='status']")
+    const toolbarEl = root.querySelector("[data-role='toolbar']")
+    const editorEl = root.querySelector("[data-role='editor']")
+    const docsListEl = root.querySelector("[data-role='docs-list']")
+    const newButton = root.querySelector("[data-role='new-doc']")
+    const saveButton = root.querySelector("[data-role='save-doc']")
+    const printButton = root.querySelector("[data-role='print-doc']")
+
+    const DOCS_DIR = `${ctx?.paths?.data || `~/spaces/${currentSpace?.id || ""}/data/`}word-docs/`
+    const TOOLBAR_ACTIONS = [
+      { label: "B", command: "bold" },
+      { label: "I", command: "italic" },
+      { label: "U", command: "underline" },
+      { label: "H1", command: "formatBlock", value: "<h1>" },
+      { label: "H2", command: "formatBlock", value: "<h2>" },
+      { label: "P", command: "formatBlock", value: "<p>" },
+      { label: "• List", command: "insertUnorderedList" },
+      { label: "1. List", command: "insertOrderedList" },
+      { label: "Quote", command: "formatBlock", value: "<blockquote>" }
+    ]
+
+    let alive = true
+    let docRecords = []
+
+    function setStatus(message) {
+      statusEl.textContent = String(message || "")
+    }
+
+    function collapseWhitespace(value) {
+      return String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+    }
+
+    function sanitizeFileName(value) {
+      const normalized = collapseWhitespace(value)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+
+      return normalized || "document"
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+    }
+
+    function getDocTitle() {
+      return collapseWhitespace(titleInput.value) || "Untitled Document"
+    }
+
+    function buildDocFileName(title) {
+      return `${sanitizeFileName(title)}.doc`
+    }
+
+    function buildDocPath(title) {
+      return `${DOCS_DIR}${buildDocFileName(title)}`
+    }
+
+    function titleFromFileName(fileName) {
+      return collapseWhitespace(String(fileName || "").replace(/\.doc$/i, "").replace(/-/g, " ")) || "Untitled Document"
+    }
+
+    function createUnusedDocumentTitle(baseTitle = "Untitled Document 1") {
+      const normalizedBaseTitle = collapseWhitespace(baseTitle) || "Untitled Document 1"
+      const usedPaths = new Set(docRecords.map((record) => String(record?.path || "").toLowerCase()))
+      const currentDraftTitle = collapseWhitespace(titleInput.value)
+
+      if (currentDraftTitle) {
+        usedPaths.add(buildDocPath(currentDraftTitle).toLowerCase())
+      }
+
+      let nextTitle = normalizedBaseTitle
+      let suffix = 2
+
+      while (usedPaths.has(buildDocPath(nextTitle).toLowerCase())) {
+        nextTitle = normalizedBaseTitle.replace(/\s+\d+$/u, ` ${suffix}`)
+        suffix += 1
+      }
+
+      return nextTitle
+    }
+
+    function sanitizeEditorHtml(sourceHtml) {
+      const doc = new DOMParser().parseFromString(`<body>${sourceHtml || ""}</body>`, "text/html")
+      const blockedSelector = "script, iframe, object, embed, link, meta"
+      doc.body.querySelectorAll(blockedSelector).forEach((node) => node.remove())
+
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT)
+      const elements = []
+      while (walker.nextNode()) {
+        elements.push(walker.currentNode)
+      }
+
+      elements.forEach((element) => {
+        Array.from(element.attributes).forEach((attribute) => {
+          const name = attribute.name.toLowerCase()
+          const value = attribute.value || ""
+          if (name.startsWith("on")) {
+            element.removeAttribute(attribute.name)
+          }
+          if ((name === "href" || name === "src") && /^\s*javascript:/i.test(value)) {
+            element.removeAttribute(attribute.name)
+          }
+        })
+      })
+
+      return doc.body.innerHTML
+    }
+
+    function buildBodyHtml() {
+      return sanitizeEditorHtml(editorEl.innerHTML)
+    }
+
+    function buildDocumentHtml(title, bodyHtml, { forWord = false } = {}) {
+      const safeTitle = title || "Untitled Document"
+      const namespacedHtml = forWord
+        ? '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">'
+        : "<html>"
+
+      return [
+        "\uFEFF",
+        namespacedHtml,
+        "<head>",
+        '<meta charset="utf-8" />',
+        `<title>${escapeHtml(safeTitle)}</title>`,
+        "<style>",
+        "@page { size: A4; margin: 18mm; }",
+        "body { font-family: Georgia, 'Times New Roman', serif; color: #1d2636; line-height: 1.55; margin: 0; }",
+        "h1, h2, h3 { color: #10182a; margin: 0 0 0.7em; }",
+        "p, ul, ol, blockquote { margin: 0 0 1em; }",
+        "blockquote { border-left: 4px solid #93b7ff; padding-left: 16px; color: #425674; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        bodyHtml,
+        "</body>",
+        "</html>"
+      ].join("")
+    }
+
+    function parseStoredDocument(sourceHtml) {
+      const doc = new DOMParser().parseFromString(String(sourceHtml || ""), "text/html")
+      const title = collapseWhitespace(doc.querySelector("title")?.textContent || "")
+      const bodyHtml = sanitizeEditorHtml(doc.body?.innerHTML || "")
+
+      return {
+        bodyHtml,
+        title: title || "Untitled Document"
+      }
+    }
+
+    async function ensureDocsDir() {
+      await ctx.appFiles.write(DOCS_DIR)
+    }
+
+    async function listStoredDocs() {
+      try {
+        const result = await ctx.appFiles.list(DOCS_DIR, false)
+        const paths = Array.isArray(result?.paths)
+          ? result.paths.filter((path) => /\.doc$/i.test(String(path || "")))
+          : []
+
+        const records = await Promise.all(
+          paths.map(async (path) => {
+            try {
+              const readResult = await ctx.appFiles.read(path, "utf8")
+              const parsed = parseStoredDocument(readResult?.content || "")
+              return {
+                path,
+                title: parsed.title || getDocTitle()
+              }
+            } catch (error) {
+              const fileName = String(path || "").split("/").pop() || "document.doc"
+              return {
+                path,
+                title: titleFromFileName(fileName)
+              }
+            }
+          })
+        )
+
+        return records.sort((left, right) => String(left.title || "").localeCompare(String(right.title || "")))
+      } catch (error) {
+        if (/404|not found/i.test(String(error?.message || ""))) {
+          return []
+        }
+        throw error
+      }
+    }
+
+    function renderStoredDocs() {
+      docsListEl.innerHTML = ""
+
+      if (!docRecords.length) {
+        docsListEl.innerHTML = '<div class="editor-demo-empty">No stored Word docs yet.</div>'
+        return
+      }
+
+      docRecords.forEach((record) => {
+        const path = String(record?.path || "")
+        const title = collapseWhitespace(record?.title || "") || "Untitled Document"
+        const card = document.createElement("div")
+        card.className = "editor-demo-doc-card"
+        card.innerHTML = `
+          <button class="editor-demo-doc-name" data-action="load" title="${escapeHtml(title)}">${escapeHtml(title)}</button>
+          <div class="editor-demo-doc-actions">
+            <button class="editor-demo-btn is-danger" data-action="delete" title="Delete">✕</button>
+          </div>
+        `
+
+        const loadButton = card.querySelector("[data-action='load']")
+        const deleteButton = card.querySelector("[data-action='delete']")
+        loadButton.onclick = async () => {
+          try {
+            const result = await ctx.appFiles.read(path, "utf8")
+            const parsed = parseStoredDocument(result?.content || "")
+            titleInput.value = parsed.title
+            editorEl.innerHTML = parsed.bodyHtml
+            setStatus(`Loaded ${title}.`)
+          } catch (error) {
+            console.error("[spaces/onboarding/wysiwyg-editor] unable to load stored doc", error)
+            setStatus(`Unable to load ${title}.`)
+          }
+        }
+
+        deleteButton.onclick = async () => {
+          try {
+            await ctx.appFiles.delete(path)
+            await refreshStoredDocs()
+            setStatus(`Deleted ${title}.`)
+          } catch (error) {
+            console.error("[spaces/onboarding/wysiwyg-editor] unable to delete stored doc", error)
+            setStatus(`Unable to delete ${title}.`)
+          }
+        }
+
+        docsListEl.appendChild(card)
+      })
+    }
+
+    async function refreshStoredDocs() {
+      docRecords = await listStoredDocs()
+      if (!alive) return
+      renderStoredDocs()
+    }
+
+    async function saveWordDocument() {
+      const title = getDocTitle()
+      const bodyHtml = buildBodyHtml()
+      const path = buildDocPath(title)
+      const documentHtml = buildDocumentHtml(title, bodyHtml, { forWord: true })
+      const exists = docRecords.some((record) => String(record?.path || "").toLowerCase() === path.toLowerCase())
+
+      await ensureDocsDir()
+      titleInput.value = title
+      await ctx.appFiles.write(path, documentHtml, "utf8")
+      await refreshStoredDocs()
+      setStatus(exists ? `Updated ${title}.` : `Stored ${title}.`)
+    }
+
+    async function createNewDocument() {
+      const title = createUnusedDocumentTitle()
+      const path = buildDocPath(title)
+      const documentHtml = buildDocumentHtml(title, "", { forWord: true })
+
+      await ensureDocsDir()
+      await ctx.appFiles.write(path, documentHtml, "utf8")
+      await refreshStoredDocs()
+      titleInput.value = title
+      editorEl.innerHTML = ""
+      setStatus(`Created ${title}.`)
+      editorEl.focus({ preventScroll: true })
+    }
+
+    function printViaIframe({ title }) {
+      const bodyHtml = buildBodyHtml()
+      const printableTitle = getDocTitle() || title || "Document"
+      const frame = document.createElement("iframe")
+      frame.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;opacity:0;pointer-events:none;border:0;"
+      document.body.appendChild(frame)
+
+      const cleanup = () => {
+        setTimeout(() => frame.remove(), 1200)
+      }
+
+      frame.onload = () => {
+        const frameWindow = frame.contentWindow
+        if (!frameWindow) {
+          cleanup()
+          return
+        }
+        frameWindow.focus()
+        frameWindow.print()
+        cleanup()
+      }
+
+      frame.srcdoc = buildDocumentHtml(printableTitle, bodyHtml, { forWord: false })
+      setStatus("Print dialog opened. Choose a printer or Save as PDF.")
+    }
+
+    function runToolbarCommand(command, value = null) {
+      editorEl.focus({ preventScroll: true })
+      document.execCommand(command, false, value)
+    }
+
+    TOOLBAR_ACTIONS.forEach((action) => {
+      const button = document.createElement("button")
+      button.className = "editor-demo-btn"
+      button.textContent = action.label
+      button.onmousedown = (event) => {
+        event.preventDefault()
+        runToolbarCommand(action.command, action.value)
+      }
+      toolbarEl.appendChild(button)
+    })
+
+    titleInput.value = "Untitled Document"
+    editorEl.innerHTML = `
+      <h1>Start writing</h1>
+      <p>This example is a browser-native WYSIWYG editor. Format rich text, save one Word document per title, and open the browser print dialog for both printing and PDF export.</p>
+      <p>Add headings, lists, or quotes from the toolbar above, then keep one stored document per name inside this space.</p>
+    `
+
+    newButton.onclick = () => {
+      void createNewDocument().catch((error) => {
+        console.error("[spaces/onboarding/wysiwyg-editor] unable to create new word doc", error)
+        setStatus("Unable to create a new document.")
+      })
+    }
+    saveButton.onclick = () => {
+      void saveWordDocument().catch((error) => {
+        console.error("[spaces/onboarding/wysiwyg-editor] unable to store word doc", error)
+        setStatus("Unable to store this Word doc.")
+      })
+    }
+    printButton.onclick = () => {
+      printViaIframe({ title: getDocTitle() })
+    }
+
+    try {
+      await ensureDocsDir()
+      await refreshStoredDocs()
+    } catch (error) {
+      console.error("[spaces/onboarding/wysiwyg-editor] unable to initialize storage", error)
+      setStatus("Editor ready, but stored docs are unavailable right now.")
+    }
+
+    return () => {
+      alive = false
+      newButton.onclick = null
+      saveButton.onclick = null
+      printButton.onclick = null
+      toolbarEl.querySelectorAll(".editor-demo-btn").forEach((button) => {
+        button.onmousedown = null
+      })
+      docsListEl.querySelectorAll(".editor-demo-btn").forEach((button) => {
+        button.onclick = null
+      })
+    }
+  }
+rows: 9
+schema: space-widget/v1

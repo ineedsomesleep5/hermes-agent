@@ -11,19 +11,24 @@ Usage:
 
 import asyncio
 import hmac
+import ipaddress
 import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
@@ -33,7 +38,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from hermes_cli import __version__, __release_date__
 from hermes_cli.config import (
-    cfg_get,
     DEFAULT_CONFIG,
     OPTIONAL_ENV_VARS,
     get_config_path,
@@ -52,7 +56,7 @@ from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
@@ -253,12 +257,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "terminal.backend": {
         "type": "select",
         "description": "Terminal execution backend",
-        "options": ["local", "docker", "ssh", "modal", "daytona", "vercel_sandbox", "singularity"],
-    },
-    "terminal.vercel_runtime": {
-        "type": "select",
-        "description": "Vercel Sandbox runtime",
-        "options": ["node24", "node22", "python3.13"],  # sync with _SUPPORTED_VERCEL_RUNTIMES in terminal_tool.py
+        "options": ["local", "docker", "ssh", "modal", "daytona", "singularity"],
     },
     "terminal.modal_mode": {
         "type": "select",
@@ -293,7 +292,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "display.busy_input_mode": {
         "type": "select",
         "description": "Input behavior while agent is running",
-        "options": ["interrupt", "queue", "steer"],
+        "options": ["interrupt", "queue"],
     },
     "memory.provider": {
         "type": "select",
@@ -344,12 +343,6 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "human_delay": "display",
     "dashboard": "display",
     "code_execution": "agent",
-    "prompt_caching": "agent",
-    "goals": "agent",
-    # Only `telegram.reactions` currently lives under telegram — fold it in
-    # with the other messaging-platform config (discord) so it isn't an
-    # orphan tab of one field.
-    "telegram": "discord",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
@@ -444,20 +437,6 @@ class EnvVarDelete(BaseModel):
 
 class EnvVarReveal(BaseModel):
     key: str
-
-
-class ModelAssignment(BaseModel):
-    """Payload for POST /api/model/set — assign a provider/model to a slot.
-
-    scope="main"        → writes model.provider + model.default
-    scope="auxiliary"   → writes auxiliary.<task>.provider + auxiliary.<task>.model
-    scope="auxiliary" with task=""  → applied to every auxiliary.* slot
-    scope="auxiliary" with task="__reset__"  → resets every slot to provider="auto"
-    """
-    scope: str
-    provider: str
-    model: str
-    task: str = ""
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -762,7 +741,7 @@ async def get_sessions(limit: int = 20, offset: int = 0):
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()
-    except Exception:
+    except Exception as e:
         _log.exception("GET /api/sessions failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -923,218 +902,24 @@ def get_model_info():
         except Exception:
             pass
 
+        # Runtime model switching is supported: PUT /api/config updates
+        # model.default and the next chat request uses the new model. The
+        # workspace gates its in-chat model picker on this flag (see
+        # hermes-workspace/src/screens/chat/components/chat-composer-model-switch.ts).
+        caps["supports_runtime_switching"] = True
+
         return {
             "model": model_name,
             "provider": provider,
             "auto_context_length": auto_ctx,
             "config_context_length": config_ctx_int,
             "effective_context_length": effective_ctx,
+            "supports_runtime_switching": True,
             "capabilities": caps,
         }
     except Exception:
         _log.exception("GET /api/model/info failed")
         return dict(_EMPTY_MODEL_INFO)
-
-
-# ---------------------------------------------------------------------------
-# Model assignment — pick provider+model for main slot or auxiliary slots.
-# Mirrors the model.options JSON-RPC from tui_gateway but uses REST so the
-# Models page (which has no chat PTY open) can drive it.
-# ---------------------------------------------------------------------------
-
-# Canonical auxiliary task slots. Keep in sync with DEFAULT_CONFIG["auxiliary"]
-# in hermes_cli/config.py — listed here for deterministic ordering in the UI.
-_AUX_TASK_SLOTS: Tuple[str, ...] = (
-    "vision",
-    "web_extract",
-    "compression",
-    "session_search",
-    "skills_hub",
-    "approval",
-    "mcp",
-    "title_generation",
-    "curator",
-)
-
-
-@app.get("/api/model/options")
-def get_model_options():
-    """Return authenticated providers + their curated model lists.
-
-    REST equivalent of the ``model.options`` JSON-RPC on tui_gateway, so the
-    dashboard Models page can render the picker without a live chat session.
-    The response shape matches ``model.options`` 1:1 so ``ModelPickerDialog``
-    can share the same types.
-    """
-    try:
-        from hermes_cli.model_switch import list_authenticated_providers
-
-        cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            current_model = model_cfg.get("default", model_cfg.get("name", "")) or ""
-            current_provider = model_cfg.get("provider", "") or ""
-            current_base_url = model_cfg.get("base_url", "") or ""
-        else:
-            current_model = str(model_cfg) if model_cfg else ""
-            current_provider = ""
-            current_base_url = ""
-
-        user_providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-        custom_providers = (
-            cfg.get("custom_providers")
-            if isinstance(cfg.get("custom_providers"), list)
-            else []
-        )
-
-        providers = list_authenticated_providers(
-            current_provider=current_provider,
-            current_base_url=current_base_url,
-            current_model=current_model,
-            user_providers=user_providers,
-            custom_providers=custom_providers,
-            max_models=50,
-        )
-        return {
-            "providers": providers,
-            "model": current_model,
-            "provider": current_provider,
-        }
-    except Exception:
-        _log.exception("GET /api/model/options failed")
-        raise HTTPException(status_code=500, detail="Failed to list model options")
-
-
-@app.get("/api/model/auxiliary")
-def get_auxiliary_models():
-    """Return current auxiliary task assignments.
-
-    Shape:
-      {
-        "tasks": [
-          {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
-          ...
-        ],
-        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
-      }
-    """
-    try:
-        cfg = load_config()
-        aux_cfg = cfg.get("auxiliary", {})
-        if not isinstance(aux_cfg, dict):
-            aux_cfg = {}
-
-        tasks = []
-        for slot in _AUX_TASK_SLOTS:
-            slot_cfg = aux_cfg.get(slot, {}) if isinstance(aux_cfg.get(slot), dict) else {}
-            tasks.append({
-                "task": slot,
-                "provider": str(slot_cfg.get("provider", "auto") or "auto"),
-                "model": str(slot_cfg.get("model", "") or ""),
-                "base_url": str(slot_cfg.get("base_url", "") or ""),
-            })
-
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            main = {
-                "provider": str(model_cfg.get("provider", "") or ""),
-                "model": str(model_cfg.get("default", model_cfg.get("name", "")) or ""),
-            }
-        else:
-            main = {"provider": "", "model": str(model_cfg) if model_cfg else ""}
-
-        return {"tasks": tasks, "main": main}
-    except Exception:
-        _log.exception("GET /api/model/auxiliary failed")
-        raise HTTPException(status_code=500, detail="Failed to read auxiliary config")
-
-
-@app.post("/api/model/set")
-async def set_model_assignment(body: ModelAssignment):
-    """Assign a model to the main slot or an auxiliary task slot.
-
-    Writes to ``~/.hermes/config.yaml`` — applies to **new** sessions only.
-    The currently running chat PTY (if any) is not affected; use the
-    ``/model`` slash command inside a chat to hot-swap that specific session.
-    """
-    scope = (body.scope or "").strip().lower()
-    provider = (body.provider or "").strip()
-    model = (body.model or "").strip()
-    task = (body.task or "").strip().lower()
-
-    if scope not in ("main", "auxiliary"):
-        raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
-
-    try:
-        cfg = load_config()
-
-        if scope == "main":
-            if not provider or not model:
-                raise HTTPException(status_code=400, detail="provider and model required for main")
-            model_cfg = cfg.get("model", {})
-            if not isinstance(model_cfg, dict):
-                model_cfg = {}
-            model_cfg["provider"] = provider
-            model_cfg["default"] = model
-            # Clear stale base_url so the resolver picks the provider's own default.
-            if "base_url" in model_cfg and model_cfg.get("base_url"):
-                model_cfg["base_url"] = ""
-            # Also clear hardcoded context_length override — new model may have
-            # a different context window.
-            if "context_length" in model_cfg:
-                model_cfg.pop("context_length", None)
-            cfg["model"] = model_cfg
-            save_config(cfg)
-            return {"ok": True, "scope": "main", "provider": provider, "model": model}
-
-        # scope == "auxiliary"
-        aux = cfg.get("auxiliary")
-        if not isinstance(aux, dict):
-            aux = {}
-
-        if task == "__reset__":
-            # Reset every slot to provider="auto", model="" — keeps other fields intact.
-            for slot in _AUX_TASK_SLOTS:
-                slot_cfg = aux.get(slot)
-                if not isinstance(slot_cfg, dict):
-                    slot_cfg = {}
-                slot_cfg["provider"] = "auto"
-                slot_cfg["model"] = ""
-                aux[slot] = slot_cfg
-            cfg["auxiliary"] = aux
-            save_config(cfg)
-            return {"ok": True, "scope": "auxiliary", "reset": True}
-
-        if not provider:
-            raise HTTPException(status_code=400, detail="provider required for auxiliary")
-
-        targets = [task] if task else list(_AUX_TASK_SLOTS)
-        for slot in targets:
-            if slot not in _AUX_TASK_SLOTS:
-                raise HTTPException(status_code=400, detail=f"unknown auxiliary task: {slot}")
-            slot_cfg = aux.get(slot)
-            if not isinstance(slot_cfg, dict):
-                slot_cfg = {}
-            slot_cfg["provider"] = provider
-            slot_cfg["model"] = model
-            aux[slot] = slot_cfg
-
-        cfg["auxiliary"] = aux
-        save_config(cfg)
-        return {
-            "ok": True,
-            "scope": "auxiliary",
-            "tasks": targets,
-            "provider": provider,
-            "model": model,
-        }
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("POST /api/model/set failed")
-        raise HTTPException(status_code=500, detail="Failed to save model assignment")
-
-
 
 
 def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1195,7 +980,7 @@ async def update_config(body: ConfigUpdate):
     try:
         save_config(_denormalize_config_from_web(body.config))
         return {"ok": True}
-    except Exception:
+    except Exception as e:
         _log.exception("PUT /api/config failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -1224,7 +1009,7 @@ async def set_env_var(body: EnvVarUpdate):
     try:
         save_env_value(body.key, body.value)
         return {"ok": True, "key": body.key}
-    except Exception:
+    except Exception as e:
         _log.exception("PUT /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -1238,7 +1023,7 @@ async def remove_env_var(body: EnvVarDelete):
         return {"ok": True, "key": body.key}
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         _log.exception("DELETE /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -1441,14 +1226,6 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
         "docs_url": "https://github.com/QwenLM/qwen-code",
         "status_fn": None,  # dispatched via auth.get_qwen_auth_status
     },
-    {
-        "id": "minimax-oauth",
-        "name": "MiniMax (OAuth)",
-        "flow": "pkce",
-        "cli_command": "hermes auth add minimax-oauth",
-        "docs_url": "https://www.minimax.io",
-        "status_fn": None,  # dispatched via auth.get_minimax_oauth_auth_status
-    },
 )
 
 
@@ -1491,16 +1268,6 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
                 "token_preview": _truncate_token(raw.get("access_token")),
                 "expires_at": raw.get("expires_at"),
                 "has_refresh_token": bool(raw.get("has_refresh_token")),
-            }
-        if provider_id == "minimax-oauth":
-            raw = hauth.get_minimax_oauth_auth_status()
-            return {
-                "logged_in": bool(raw.get("logged_in")),
-                "source": "minimax_oauth",
-                "source_label": f"MiniMax ({raw.get('region', 'global')})",
-                "token_preview": None,
-                "expires_at": raw.get("expires_at"),
-                "has_refresh_token": True,
             }
     except Exception as e:
         return {"logged_in": False, "error": str(e)}
@@ -1813,6 +1580,7 @@ async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
     then spawns a background poller. Returns the user-facing display fields
     so the UI can render the verification page link + user code.
     """
+    from hermes_cli import auth as hauth
     if provider_id == "nous":
         from hermes_cli.auth import _request_device_code, PROVIDER_REGISTRY
         import httpx
@@ -2215,6 +1983,12 @@ async def get_logs(
 ):
     from hermes_cli.logs import _read_tail, LOG_FILES
 
+    file = (file or "agent").strip()
+    if file.endswith(".log"):
+        file = file[:-4]
+    if file == "gateway-supervisor":
+        file = "gateway"
+
     log_name = LOG_FILES.get(file)
     if not log_name:
         raise HTTPException(status_code=400, detail=f"Unknown log file: {file}")
@@ -2346,251 +2120,814 @@ async def delete_cron_job(job_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Profile management endpoints (minimal — list/create/rename/delete + SOUL.md)
+# Hermes Studio — durable background jobs (delegations, widget renders, etc.)
 # ---------------------------------------------------------------------------
 
 
-class ProfileCreate(BaseModel):
-    name: str
-    clone_from_default: bool = False
+class StudioJobCreate(BaseModel):
+    runner: str
+    kwargs: Optional[Dict[str, Any]] = None
 
 
-class ProfileRename(BaseModel):
-    new_name: str
-
-
-class ProfileSoulUpdate(BaseModel):
-    content: str
-
-
-def _profile_attr(info, name: str, default: Any = None) -> Any:
+@app.post("/api/studio/jobs")
+async def create_studio_job(body: StudioJobCreate):
+    from tools.background_jobs import enqueue
     try:
-        return getattr(info, name)
+        return enqueue(body.runner, body.kwargs or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/studio/jobs")
+async def list_studio_jobs(status: Optional[str] = None):
+    from tools.background_jobs import list_jobs
+    return list_jobs(status=status)
+
+
+@app.get("/api/studio/jobs/{job_id}")
+async def get_studio_job(job_id: str):
+    from tools.background_jobs import get_job
+    rec = get_job(job_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return rec
+
+
+@app.delete("/api/studio/jobs/{job_id}")
+async def cancel_studio_job(job_id: str):
+    from tools.background_jobs import cancel
+    if not cancel(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True}
+
+
+@app.get("/api/studio/jobs/{job_id}/stream")
+def stream_studio_job(job_id: str, timeout: int = 300):
+    """SSE stream of progress + status events for a single job.
+
+    Sync route on purpose: ``subscribe()`` is a blocking generator (Queue.get),
+    and FastAPI runs sync StreamingResponse generators on a thread pool, so
+    the event loop is never blocked by a slow job.
+    """
+    from tools.background_jobs import get_job, subscribe
+
+    if get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    def event_stream():
+        for event in subscribe(job_id, timeout=timeout):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hermes Studio — canvas (spaces + widgets) live API
+# ---------------------------------------------------------------------------
+
+
+class StudioSpaceCreate(BaseModel):
+    id: str
+    title: Optional[str] = None
+
+
+class StudioWidgetUpsert(BaseModel):
+    title: str
+    renderer: str
+    position: Optional[Dict[str, int]] = None
+    size: Optional[Dict[str, int]] = None
+
+
+class StudioLayoutPatch(BaseModel):
+    position: Optional[Dict[str, int]] = None
+    size: Optional[Dict[str, int]] = None
+
+
+class StudioPresetInstall(BaseModel):
+    name: str
+    id: Optional[str] = None
+    title: Optional[str] = None
+    space_id: Optional[str] = "default"
+    position: Optional[Dict[str, int]] = None
+    size: Optional[Dict[str, int]] = None
+
+
+class StudioExternalFetch(BaseModel):
+    url: str
+    method: Optional[str] = "GET"
+    headers: Optional[Dict[str, str]] = None
+    body: Optional[str] = None
+
+class StudioBrowserNavigate(BaseModel):
+    url: str
+
+
+class StudioBrowserPoint(BaseModel):
+    x: float
+    y: float
+    displayWidth: float
+    displayHeight: float
+    deltaX: Optional[float] = 0
+    deltaY: Optional[float] = 0
+
+
+class StudioBrowserType(BaseModel):
+    text: str
+
+
+class StudioBrowserKey(BaseModel):
+    key: str
+
+
+class StudioBrowserTabIndex(BaseModel):
+    index: int = 0
+
+
+class StudioBrowserRecordPath(BaseModel):
+    path: Optional[str] = None
+
+
+_STUDIO_BROWSER_PORT = int(os.environ.get("STUDIO_BROWSER_PORT", "9322"))
+_STUDIO_BROWSER_PROCESS: Optional[subprocess.Popen] = None
+_STUDIO_BROWSER_LOCK = threading.Lock()
+
+
+def _studio_browser_script() -> Path:
+    return PROJECT_ROOT / "tools" / "studio_browser_server.js"
+
+
+def _studio_browser_health() -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{_STUDIO_BROWSER_PORT}/health", timeout=1
+        ) as resp:
+            return resp.status == 200
     except Exception:
-        return default
+        return False
 
 
-def _profile_to_dict(info) -> Dict[str, Any]:
+def _ensure_studio_browser() -> None:
+    global _STUDIO_BROWSER_PROCESS
+    with _STUDIO_BROWSER_LOCK:
+        if _studio_browser_health():
+            return
+        if _STUDIO_BROWSER_PROCESS and _STUDIO_BROWSER_PROCESS.poll() is None:
+            try:
+                _STUDIO_BROWSER_PROCESS.terminate()
+            except Exception:
+                pass
+        script = _studio_browser_script()
+        if not script.exists():
+            raise HTTPException(status_code=500, detail="Studio browser helper missing")
+        env = dict(os.environ)
+        env.setdefault("STUDIO_BROWSER_PORT", str(_STUDIO_BROWSER_PORT))
+        _STUDIO_BROWSER_PROCESS = subprocess.Popen(
+            ["node", str(script)],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if _studio_browser_health():
+                return
+            time.sleep(0.25)
+        raise HTTPException(status_code=503, detail="Studio browser did not start")
+
+
+def _studio_browser_request(path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    _ensure_studio_browser()
+    url = f"http://127.0.0.1:{_STUDIO_BROWSER_PORT}{path}"
+    data = None
+    headers = {}
+    method = "GET"
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        method = "POST"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=35) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        raw = exc.read(65536).decode("utf-8", errors="replace")
+        raise HTTPException(status_code=exc.code, detail=raw) from exc
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]+)?\]\]")
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _studio_slug(value: str) -> str:
+    slug = value.replace("\\", "/").replace(".md", "").strip().lower()
+    slug = re.sub(r"[^a-z0-9/_ -]+", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug.strip("-/")
+
+
+def _studio_obsidian_vault_path() -> Path:
+    """Resolve the active Obsidian/wiki vault used by the supervisor profile."""
+    hermes_home = get_hermes_home()
+    # Tests and alternate profiles set HERMES_HOME to an isolated directory.
+    # Do not let the VPS-level OBSIDIAN_VAULT_PATH (/root/wiki) bleed into
+    # those runs, or graph tests/indexing read Caleb's real wiki instead of
+    # the temporary fixture vault.
+    if os.environ.get("HERMES_HOME") and hermes_home != Path("/opt/data"):
+        return hermes_home / "profiles" / "supervisor" / "home" / "wiki"
+
+    env_path = os.environ.get("OBSIDIAN_VAULT_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    try:
+        config = load_config()
+    except Exception:  # noqa: BLE001
+        config = {}
+    wiki_cfg = (
+        ((config.get("skills") or {}).get("config") or {}).get("wiki") or {}
+    )
+    configured = wiki_cfg.get("path")
+    if configured:
+        return Path(str(configured)).expanduser()
+
+    return get_hermes_home() / "profiles" / "supervisor" / "home" / "wiki"
+
+
+def _studio_parse_markdown_note(path: Path, vault: Path) -> Dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    rel = path.relative_to(vault).as_posix()
+    note_id = rel[:-3] if rel.endswith(".md") else rel
+    frontmatter: Dict[str, Any] = {}
+    body = text
+
+    match = _FRONTMATTER_RE.match(text)
+    if match:
+        try:
+            parsed = yaml.safe_load(match.group(1)) or {}
+            if isinstance(parsed, dict):
+                frontmatter = parsed
+        except Exception:  # noqa: BLE001
+            frontmatter = {}
+        body = text[match.end():]
+
+    heading = _HEADING_RE.search(body)
+    title = (
+        str(frontmatter.get("title") or "").strip()
+        or (heading.group(1).strip() if heading else "")
+        or path.stem.replace("-", " ").replace("_", " ").title()
+    )
+    folder = rel.split("/", 1)[0] if "/" in rel else "root"
+    raw_tags = frontmatter.get("tags") or []
+    if isinstance(raw_tags, str):
+        tags = [raw_tags]
+    elif isinstance(raw_tags, list):
+        tags = [str(tag) for tag in raw_tags if tag]
+    else:
+        tags = []
+
     return {
-        "name": _profile_attr(info, "name", ""),
-        "path": str(_profile_attr(info, "path", "")),
-        "is_default": bool(_profile_attr(info, "is_default", False)),
-        "model": _profile_attr(info, "model"),
-        "provider": _profile_attr(info, "provider"),
-        "has_env": bool(_profile_attr(info, "has_env", False)),
-        "skill_count": int(_profile_attr(info, "skill_count", 0) or 0),
+        "id": note_id,
+        "title": title,
+        "path": rel,
+        "folder": folder,
+        "type": str(frontmatter.get("type") or folder).strip() or folder,
+        "tags": tags[:12],
+        "created": frontmatter.get("created"),
+        "updated": frontmatter.get("updated"),
+        "mtime": path.stat().st_mtime,
+        "links": [_studio_slug(link) for link in _WIKILINK_RE.findall(body)],
     }
 
 
-def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
-    def _safe(callable_, default):
+def _studio_build_obsidian_graph(limit: int = 260, include_raw: bool = False) -> Dict[str, Any]:
+    """Index supervisor wiki Markdown files into an Obsidian-style graph."""
+    vault = _studio_obsidian_vault_path()
+    if not vault.exists() or not vault.is_dir():
+        raise HTTPException(status_code=404, detail=f"Vault not found: {vault}")
+
+    limit = max(20, min(int(limit or 260), 500))
+    candidates: List[Path] = []
+    for path in vault.rglob("*.md"):
         try:
-            return callable_()
-        except Exception:
-            return default
+            rel_parts = path.relative_to(vault).parts
+        except ValueError:
+            continue
+        if not include_raw and rel_parts and rel_parts[0] == "raw":
+            continue
+        candidates.append(path)
 
-    profiles: List[Dict[str, Any]] = []
-    default_home = profiles_mod._get_default_hermes_home()
-    if default_home.is_dir():
-        model, provider = _safe(lambda: profiles_mod._read_config_model(default_home), (None, None))
-        profiles.append({
-            "name": "default",
-            "path": str(default_home),
-            "is_default": True,
-            "model": model,
-            "provider": provider,
-            "has_env": (default_home / ".env").exists(),
-            "skill_count": _safe(lambda: profiles_mod._count_skills(default_home), 0),
-        })
-
-    profiles_root = profiles_mod._get_profiles_root()
-    if profiles_root.is_dir():
-        for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir() or not profiles_mod._PROFILE_ID_RE.match(entry.name):
-                continue
-            model, provider = _safe(lambda entry=entry: profiles_mod._read_config_model(entry), (None, None))
-            profiles.append({
-                "name": entry.name,
-                "path": str(entry),
-                "is_default": False,
-                "model": model,
-                "provider": provider,
-                "has_env": (entry / ".env").exists(),
-                "skill_count": _safe(lambda entry=entry: profiles_mod._count_skills(entry), 0),
-            })
-
-    return profiles
-
-
-def _resolve_profile_dir(name: str) -> Path:
-    """Validate ``name`` and resolve to its directory or raise an HTTPException."""
-    from hermes_cli import profiles as profiles_mod
-    try:
-        profiles_mod.validate_profile_name(name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if not profiles_mod.profile_exists(name):
-        raise HTTPException(status_code=404, detail=f"Profile '{name}' does not exist.")
-    return profiles_mod.get_profile_dir(name)
-
-
-def _profile_setup_command(name: str) -> str:
-    """Return the shell command used to configure a profile in the CLI."""
-    _resolve_profile_dir(name)
-    return "hermes setup" if name == "default" else f"{name} setup"
-
-
-@app.get("/api/profiles")
-async def list_profiles_endpoint():
-    from hermes_cli import profiles as profiles_mod
-    try:
-        return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
-    except Exception:
-        _log.exception("GET /api/profiles failed; falling back to profile directory scan")
-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
-
-
-@app.post("/api/profiles")
-async def create_profile_endpoint(body: ProfileCreate):
-    from hermes_cli import profiles as profiles_mod
-    try:
-        path = profiles_mod.create_profile(
-            name=body.name,
-            clone_from="default" if body.clone_from_default else None,
-            clone_config=body.clone_from_default,
+    candidates.sort(
+        key=lambda p: (
+            0 if p.name.lower() in {"index.md", "schema.md", "readme.md"} else 1,
+            -p.stat().st_mtime,
+            p.relative_to(vault).as_posix().lower(),
         )
-        # Match the CLI's profile-create flow: fresh named profiles get the
-        # bundled skills installed. When cloning from default, create_profile()
-        # has already copied the source profile's skills, including any
-        # user-installed skills.
-        if not body.clone_from_default:
-            profiles_mod.seed_profile_skills(path, quiet=True)
+    )
+    notes = [_studio_parse_markdown_note(path, vault) for path in candidates[:limit]]
 
-        # Match the CLI's profile-create flow: named profiles should get a
-        # wrapper in ~/.local/bin when the alias is safe to create.
-        collision = profiles_mod.check_alias_collision(body.name)
-        if not collision:
-            profiles_mod.create_wrapper_script(body.name)
-    except (ValueError, FileExistsError, FileNotFoundError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        _log.exception("POST /api/profiles failed")
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "name": body.name, "path": str(path)}
+    alias_to_id: Dict[str, str] = {}
+    for note in notes:
+        aliases = {
+            note["id"],
+            note["path"][:-3] if str(note["path"]).endswith(".md") else note["path"],
+            Path(str(note["id"])).name,
+            str(note["title"]),
+        }
+        for alias in aliases:
+            slug = _studio_slug(str(alias))
+            if slug:
+                alias_to_id.setdefault(slug, note["id"])
+
+    edge_seen = set()
+    edges: List[Dict[str, str]] = []
+    degree = {note["id"]: 0 for note in notes}
+    for note in notes:
+        for raw_target in note["links"]:
+            target = alias_to_id.get(raw_target) or alias_to_id.get(Path(raw_target).name)
+            if not target or target == note["id"]:
+                continue
+            key = (note["id"], target)
+            if key in edge_seen:
+                continue
+            edge_seen.add(key)
+            edges.append({"source": note["id"], "target": target, "kind": "wikilink"})
+            degree[note["id"]] += 1
+            degree[target] += 1
+
+    now = datetime.now(timezone.utc).isoformat()
+    nodes = [
+        {
+            "id": note["id"],
+            "title": note["title"],
+            "path": note["path"],
+            "folder": note["folder"],
+            "type": note["type"],
+            "tags": note["tags"],
+            "created": note["created"],
+            "updated": note["updated"],
+            "degree": degree.get(note["id"], 0),
+            "mtime": note["mtime"],
+        }
+        for note in notes
+    ]
+    nodes.sort(key=lambda n: (-int(n.get("degree") or 0), str(n.get("path") or "")))
+
+    return {
+        "vault_path": str(vault),
+        "generated_at": now,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
-@app.get("/api/profiles/{name}/setup-command")
-async def get_profile_setup_command(name: str):
-    return {"command": _profile_setup_command(name)}
+@app.get("/api/studio/obsidian-graph")
+async def studio_obsidian_graph(limit: int = 260, include_raw: int = 0):
+    return await asyncio.to_thread(
+        _studio_build_obsidian_graph,
+        limit,
+        bool(include_raw),
+    )
 
 
-@app.post("/api/profiles/{name}/open-terminal")
-async def open_profile_terminal_endpoint(name: str):
+@app.get("/api/studio/spaces")
+async def list_studio_spaces():
+    from tools.studio_widgets import list_spaces
+    return list_spaces()
+
+
+@app.post("/api/studio/spaces")
+async def create_studio_space(body: StudioSpaceCreate):
+    from tools.studio_widgets import create_space
     try:
-        command = _profile_setup_command(name)
-
-        if sys.platform.startswith("win"):
-            subprocess.Popen(["cmd.exe", "/c", "start", "", command])
-        elif sys.platform == "darwin":
-            escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-            applescript = (
-                'tell application "Terminal"\n'
-                "activate\n"
-                f'do script "{escaped}"\n'
-                "end tell"
-            )
-            subprocess.Popen(["osascript", "-e", applescript])
-        else:
-            terminal_commands = [
-                ("x-terminal-emulator", ["x-terminal-emulator", "-e", "sh", "-lc", command]),
-                ("gnome-terminal", ["gnome-terminal", "--", "sh", "-lc", command]),
-                ("konsole", ["konsole", "-e", "sh", "-lc", command]),
-                ("xfce4-terminal", ["xfce4-terminal", "-e", f"sh -lc '{command}'"]),
-                ("mate-terminal", ["mate-terminal", "-e", f"sh -lc '{command}'"]),
-                ("lxterminal", ["lxterminal", "-e", f"sh -lc '{command}'"]),
-                ("tilix", ["tilix", "-e", "sh", "-lc", command]),
-                ("alacritty", ["alacritty", "-e", "sh", "-lc", command]),
-                ("kitty", ["kitty", "sh", "-lc", command]),
-                ("xterm", ["xterm", "-e", "sh", "-lc", command]),
-            ]
-            for executable, popen_args in terminal_commands:
-                if subprocess.call(
-                    ["which", executable],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                ) == 0:
-                    subprocess.Popen(popen_args)
-                    break
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No supported terminal emulator found",
-                )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        _log.exception("POST /api/profiles/%s/open-terminal failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "command": command}
+        return create_space(body.id, title=body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.patch("/api/profiles/{name}")
-async def rename_profile_endpoint(name: str, body: ProfileRename):
-    from hermes_cli import profiles as profiles_mod
+@app.get("/api/studio/spaces/{space_id}")
+async def get_studio_space(space_id: str):
+    from tools.studio_widgets import get_space
+    rec = get_space(space_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Space not found")
+    return rec
+
+
+@app.delete("/api/studio/spaces/{space_id}")
+async def delete_studio_space(space_id: str):
+    from tools.studio_widgets import delete_space
     try:
-        path = profiles_mod.rename_profile(name, body.new_name)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except (ValueError, FileExistsError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        _log.exception("PATCH /api/profiles/%s failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "name": body.new_name, "path": str(path)}
-
-
-@app.delete("/api/profiles/{name}")
-async def delete_profile_endpoint(name: str):
-    """Delete a profile. The dashboard collects the user's confirmation in
-    its own dialog before this request, so we always pass ``yes=True`` to
-    skip the CLI's interactive prompt."""
-    from hermes_cli import profiles as profiles_mod
-    try:
-        path = profiles_mod.delete_profile(name, yes=True)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        _log.exception("DELETE /api/profiles/%s failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "path": str(path)}
-
-
-@app.get("/api/profiles/{name}/soul")
-async def get_profile_soul(name: str):
-    soul_path = _resolve_profile_dir(name) / "SOUL.md"
-    if soul_path.exists():
-        try:
-            return {"content": soul_path.read_text(encoding="utf-8"), "exists": True}
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"Could not read SOUL.md: {e}")
-    return {"content": "", "exists": False}
-
-
-@app.put("/api/profiles/{name}/soul")
-async def update_profile_soul(name: str, body: ProfileSoulUpdate):
-    soul_path = _resolve_profile_dir(name) / "SOUL.md"
-    try:
-        soul_path.write_text(body.content, encoding="utf-8")
-    except OSError as e:
-        _log.exception("PUT /api/profiles/%s/soul failed", name)
-        raise HTTPException(status_code=500, detail=f"Could not write SOUL.md: {e}")
+        if not delete_space(space_id):
+            raise HTTPException(status_code=404, detail="Space not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+@app.put("/api/studio/spaces/{space_id}/widgets/{widget_id}")
+async def upsert_studio_widget(space_id: str, widget_id: str, body: StudioWidgetUpsert):
+    from tools.studio_widgets import upsert_widget
+    try:
+        return upsert_widget(
+            space_id, widget_id,
+            title=body.title, renderer=body.renderer,
+            position=body.position, size=body.size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/studio/spaces/{space_id}/widgets/{widget_id}")
+async def get_studio_widget(space_id: str, widget_id: str):
+    from tools.studio_widgets import get_widget
+    rec = get_widget(space_id, widget_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    return rec
+
+
+@app.delete("/api/studio/spaces/{space_id}/widgets/{widget_id}")
+async def delete_studio_widget(space_id: str, widget_id: str):
+    from tools.studio_widgets import delete_widget
+    if not delete_widget(space_id, widget_id):
+        raise HTTPException(status_code=404, detail="Widget not found")
+    return {"ok": True}
+
+
+@app.patch("/api/studio/spaces/{space_id}/widgets/{widget_id}/layout")
+async def patch_studio_widget_layout(
+    space_id: str, widget_id: str, body: StudioLayoutPatch
+):
+    from tools.studio_widgets import set_layout
+    if body.position is None and body.size is None:
+        raise HTTPException(status_code=400, detail="position and/or size required")
+    try:
+        rec = set_layout(
+            space_id, widget_id, position=body.position, size=body.size
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    return rec
+
+
+@app.get("/api/studio/presets")
+async def list_studio_presets():
+    from tools.studio_presets import studio_list_presets
+
+    return json.loads(studio_list_presets({}))
+
+
+@app.post("/api/studio/presets/install")
+async def install_studio_preset(body: StudioPresetInstall):
+    from tools.studio_presets import studio_install_preset
+
+    result = json.loads(
+        studio_install_preset(
+            {
+                "name": body.name,
+                "id": body.id,
+                "title": body.title,
+                "space_id": body.space_id or "default",
+                "position": body.position,
+                "size": body.size,
+            }
+        )
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+_STUDIO_FETCH_MAX_BYTES = 1_000_000
+_STUDIO_FETCH_TIMEOUT = 12
+_STUDIO_FETCH_ALLOWED_HEADERS = {
+    "accept",
+    "accept-language",
+    "content-type",
+    "user-agent",
+}
+
+
+def _studio_host_is_public(hostname: str) -> bool:
+    """Avoid turning Studio's fetch bridge into a localhost/private SSRF tool."""
+    if not hostname:
+        return False
+    host = hostname.strip("[]")
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    addresses = {info[4][0] for info in infos if info and info[4]}
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+def _studio_fetch_external_sync(body: StudioExternalFetch) -> Dict[str, Any]:
+    parsed = urllib.parse.urlparse(body.url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Only absolute http(s) URLs are allowed")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="Userinfo in URLs is not allowed")
+    if not _studio_host_is_public(parsed.hostname or ""):
+        raise HTTPException(status_code=400, detail="URL host must resolve to public internet addresses")
+
+    method = (body.method or "GET").upper()
+    if method not in {"GET", "POST"}:
+        raise HTTPException(status_code=400, detail="Only GET and POST are allowed")
+
+    headers = {
+        key: value
+        for key, value in (body.headers or {}).items()
+        if key.lower() in _STUDIO_FETCH_ALLOWED_HEADERS
+    }
+    headers.setdefault("User-Agent", "Hermes-Studio-Widget/1.0")
+    payload = body.body.encode("utf-8") if body.body is not None else None
+    req = urllib.request.Request(body.url, data=payload, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=_STUDIO_FETCH_TIMEOUT) as resp:
+            raw = resp.read(_STUDIO_FETCH_MAX_BYTES + 1)
+            if len(raw) > _STUDIO_FETCH_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="External response too large")
+            return {
+                "ok": True,
+                "status": resp.status,
+                "url": resp.geturl(),
+                "headers": {
+                    "content-type": resp.headers.get("content-type", "text/plain; charset=utf-8"),
+                },
+                "body": raw.decode("utf-8", errors="replace"),
+            }
+    except HTTPError as exc:
+        raw = exc.read(min(_STUDIO_FETCH_MAX_BYTES, 65536))
+        return {
+            "ok": False,
+            "status": exc.code,
+            "url": body.url,
+            "headers": {"content-type": exc.headers.get("content-type", "text/plain")},
+            "body": raw.decode("utf-8", errors="replace"),
+        }
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+
+@app.get("/api/studio/proxy")
+async def studio_iframe_proxy(url: str):
+    import httpx
+    import re
+    from fastapi import Response
+    from urllib.parse import urlparse
+    try:
+        async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+            
+        headers = dict(resp.headers)
+        
+        # Strip framing restrictions
+        for h in ["x-frame-options", "content-security-policy", "content-security-policy-report-only", "x-xss-protection", "strict-transport-security", "transfer-encoding", "content-encoding"]:
+            for key in list(headers.keys()):
+                if key.lower() == h:
+                    headers.pop(key, None)
+            
+        content = resp.content
+        
+        # Inject base tag for relative links if HTML
+        if b"<head>" in content.lower():
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}".encode('utf-8')
+            content = re.sub(br'(?i)(<head[^>]*>)', b'\1<base href="' + base_url + b'/">', content, count=1)
+            
+        return Response(content=content, status_code=resp.status_code, headers=headers)
+    except Exception as e:
+        from fastapi import Response
+        return Response(content=f"Proxy error: {str(e)}", status_code=500)
+
+@app.post("/api/studio/fetch-external")
+
+async def studio_fetch_external(body: StudioExternalFetch):
+    return await asyncio.to_thread(_studio_fetch_external_sync, body)
+
+@app.get("/api/studio/browser/state")
+async def studio_browser_state():
+    return await asyncio.to_thread(_studio_browser_request, "/state")
+
+
+@app.post("/api/studio/browser/navigate")
+async def studio_browser_navigate(body: StudioBrowserNavigate):
+    return await asyncio.to_thread(_studio_browser_request, "/navigate", {"url": body.url})
+
+
+@app.post("/api/studio/browser/reload")
+async def studio_browser_reload():
+    return await asyncio.to_thread(_studio_browser_request, "/reload", {})
+
+
+@app.post("/api/studio/browser/back")
+async def studio_browser_back():
+    return await asyncio.to_thread(_studio_browser_request, "/back", {})
+
+
+@app.post("/api/studio/browser/forward")
+async def studio_browser_forward():
+    return await asyncio.to_thread(_studio_browser_request, "/forward", {})
+
+
+@app.post("/api/studio/browser/click")
+async def studio_browser_click(body: StudioBrowserPoint):
+    return await asyncio.to_thread(_studio_browser_request, "/click", body.model_dump())
+
+
+@app.post("/api/studio/browser/scroll")
+async def studio_browser_scroll(body: StudioBrowserPoint):
+    return await asyncio.to_thread(_studio_browser_request, "/scroll", body.model_dump())
+
+
+@app.post("/api/studio/browser/type")
+async def studio_browser_type(body: StudioBrowserType):
+    return await asyncio.to_thread(_studio_browser_request, "/type", {"text": body.text})
+
+
+@app.post("/api/studio/browser/key")
+async def studio_browser_key(body: StudioBrowserKey):
+    return await asyncio.to_thread(_studio_browser_request, "/key", {"key": body.key})
+
+
+@app.post("/api/studio/browser/tab/new")
+async def studio_browser_tab_new():
+    return await asyncio.to_thread(_studio_browser_request, "/tab/new", {})
+
+
+@app.post("/api/studio/browser/tab/select")
+async def studio_browser_tab_select(body: StudioBrowserTabIndex):
+    return await asyncio.to_thread(_studio_browser_request, "/tab/select", {"index": body.index})
+
+
+@app.post("/api/studio/browser/tab/close")
+async def studio_browser_tab_close(body: StudioBrowserTabIndex):
+    return await asyncio.to_thread(_studio_browser_request, "/tab/close", {"index": body.index})
+
+
+@app.post("/api/studio/browser/record/start")
+async def studio_browser_record_start(body: StudioBrowserRecordPath):
+    payload = {"path": body.path} if body.path else {}
+    return await asyncio.to_thread(_studio_browser_request, "/record/start", payload)
+
+
+@app.post("/api/studio/browser/record/stop")
+async def studio_browser_record_stop():
+    return await asyncio.to_thread(_studio_browser_request, "/record/stop", {})
+
+
+@app.get("/api/studio/spaces/{space_id}/events")
+def stream_studio_space_events(space_id: str, timeout: int = 300, replay: int = 1):
+    """SSE stream of widget.upserted/deleted/position_changed for a space.
+
+    Sync route: ``subscribe()`` is a blocking generator (Queue.get); FastAPI
+    runs sync StreamingResponse generators on a thread pool, so the event
+    loop is never blocked while waiting for the next mutation.
+    """
+    from tools.studio_widgets import get_space, subscribe
+
+    if get_space(space_id) is None:
+        raise HTTPException(status_code=404, detail="Space not found")
+
+    def event_stream():
+        for event in subscribe(
+            space_id, timeout=timeout, replay=bool(replay), follow=True
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hermes Studio — streaming chat (SSE)
+# ---------------------------------------------------------------------------
+
+
+class StudioChatBody(BaseModel):
+    session_id: str
+    # Accepts either a plain string (text-only) or an OpenAI-style content
+    # array — list of {type:"text", text:"..."} / {type:"image_url",
+    # image_url:{url:"data:image/..."}} parts. Forwarded to the gateway
+    # as-is so the underlying model can do vision when supported.
+    message: Union[str, List[Dict[str, Any]]]
+    space_id: Optional[str] = "default"
+
+
+@app.post("/api/studio/chat")
+async def studio_chat_stream(body: StudioChatBody):
+    """Stream a chat turn — text deltas + tool-call events.
+
+    The browser POSTs one user turn; this route SSE-streams the LLM
+    response, executing widget tool calls server-side as they're emitted.
+    Tool side-effects mutate ``studio_widgets`` directly, which fans out
+    over the existing /api/studio/spaces/{id}/events SSE channel — so the
+    canvas updates live alongside the chat stream.
+    """
+    from tools.studio_chat import stream_chat
+
+    async def event_stream():
+        # Force response headers/body to flush immediately. Without an
+        # early byte, a slow gateway/model turn can leave Cloudflare and
+        # browsers waiting for response headers until they surface a 524.
+        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        await asyncio.sleep(0)
+        async for event in stream_chat(
+            body.session_id, body.message, body.space_id or "default"
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+            await asyncio.sleep(0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/studio/chat/reset")
+async def studio_chat_reset(body: StudioChatBody):
+    from tools.studio_chat import reset_session
+    reset_session(body.session_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Hermes Studio — read-only window on background-delegation jobs (for the
+# subagent monitor widget). Reads the JSON file the agent process writes
+# atomically so we always see fresh state without coupling our process to
+# the agent's in-memory cache.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/studio/delegations")
+async def list_studio_delegations(
+    state: Optional[str] = None, limit: Optional[int] = None
+):
+    from hermes_constants import get_hermes_home
+    import json as _json
+
+    path = get_hermes_home() / "delegation" / "jobs.json"
+    if not path.exists():
+        return []
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if isinstance(data, dict):
+        jobs_obj = data.get("jobs", data)
+    else:
+        jobs_obj = data
+    if isinstance(jobs_obj, dict):
+        jobs = list(jobs_obj.values())
+    elif isinstance(jobs_obj, list):
+        jobs = jobs_obj
+    else:
+        jobs = []
+
+    if state:
+        st = state.strip().lower()
+        jobs = [j for j in jobs if str(j.get("status") or "").lower() == st]
+    jobs.sort(
+        key=lambda j: (j.get("created_at") or "", j.get("job_id") or ""),
+        reverse=True,
+    )
+    if limit and limit > 0:
+        jobs = jobs[:limit]
+    return jobs
 
 
 # ---------------------------------------------------------------------------
@@ -2763,99 +3100,6 @@ async def get_usage_analytics(days: int = 30):
         db.close()
 
 
-@app.get("/api/analytics/models")
-async def get_models_analytics(days: int = 30):
-    """Rich per-model analytics for the Models dashboard page.
-
-    Returns token/cost/session breakdown per model plus capability metadata
-    from models.dev (context window, vision, tools, reasoning, etc.).
-    """
-    from hermes_state import SessionDB
-
-    db = SessionDB()
-    try:
-        cutoff = time.time() - (days * 86400)
-
-        cur = db._conn.execute("""
-            SELECT model,
-                   billing_provider,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls,
-                   SUM(tool_call_count) as tool_calls,
-                   MAX(started_at) as last_used_at,
-                   AVG(input_tokens + output_tokens) as avg_tokens_per_session
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-            GROUP BY model, billing_provider
-            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        rows = [dict(r) for r in cur.fetchall()]
-
-        models = []
-        for row in rows:
-            provider = row.get("billing_provider") or ""
-            model_name = row["model"]
-            caps = {}
-            try:
-                from agent.models_dev import get_model_capabilities
-                mc = get_model_capabilities(provider=provider, model=model_name)
-                if mc is not None:
-                    caps = {
-                        "supports_tools": mc.supports_tools,
-                        "supports_vision": mc.supports_vision,
-                        "supports_reasoning": mc.supports_reasoning,
-                        "context_window": mc.context_window,
-                        "max_output_tokens": mc.max_output_tokens,
-                        "model_family": mc.model_family,
-                    }
-            except Exception:
-                pass
-
-            models.append({
-                "model": model_name,
-                "provider": provider,
-                "input_tokens": row["input_tokens"],
-                "output_tokens": row["output_tokens"],
-                "cache_read_tokens": row["cache_read_tokens"],
-                "reasoning_tokens": row["reasoning_tokens"],
-                "estimated_cost": row["estimated_cost"],
-                "actual_cost": row["actual_cost"],
-                "sessions": row["sessions"],
-                "api_calls": row["api_calls"],
-                "tool_calls": row["tool_calls"],
-                "last_used_at": row["last_used_at"],
-                "avg_tokens_per_session": row["avg_tokens_per_session"],
-                "capabilities": caps,
-            })
-
-        totals_cur = db._conn.execute("""
-            SELECT COUNT(DISTINCT model) as distinct_models,
-                   SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-        """, (cutoff,))
-        totals = dict(totals_cur.fetchone())
-
-        return {
-            "models": models,
-            "totals": totals,
-            "period_days": days,
-        }
-    finally:
-        db.close()
-
-
 # ---------------------------------------------------------------------------
 # /api/pty — PTY-over-WebSocket bridge for the dashboard "Chat" tab.
 #
@@ -2881,25 +3125,6 @@ _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # Starlette's TestClient reports the peer as "testclient"; treat it as
 # loopback so tests don't need to rewrite request scope.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
-
-
-def _is_public_bind() -> bool:
-    """True when bound to all-interfaces (operator used --insecure)."""
-    return getattr(app.state, "bound_host", "") in ("0.0.0.0", "::")
-
-
-def _ws_client_is_allowed(ws: "WebSocket") -> bool:
-    """Check if the WebSocket client IP is acceptable.
-
-    Allows loopback always; allows any IP when bound to all-interfaces
-    (--insecure mode, guarded by session token auth).
-    """
-    if _is_public_bind():
-        return True
-    client_host = ws.client.host if ws.client else ""
-    if not client_host:
-        return True
-    return client_host in _LOOPBACK_HOSTS
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -2931,14 +3156,16 @@ def _resolve_chat_argv(
     from hermes_cli.main import PROJECT_ROOT, _make_tui_argv
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
-    env = os.environ.copy()
-    env.setdefault("NODE_ENV", "production")
+    env: Optional[dict] = None
 
-    if resume:
-        env["HERMES_TUI_RESUME"] = resume
+    if resume or sidecar_url:
+        env = os.environ.copy()
 
-    if sidecar_url:
-        env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
+        if resume:
+            env["HERMES_TUI_RESUME"] = resume
+
+        if sidecar_url:
+            env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
 
     return list(argv), str(cwd) if cwd else None, env
 
@@ -2991,7 +3218,8 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    client_host = ws.client.host if ws.client else ""
+    if client_host and client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3098,7 +3326,8 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    client_host = ws.client.host if ws.client else ""
+    if client_host and client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3130,7 +3359,8 @@ async def pub_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    client_host = ws.client.host if ws.client else ""
+    if client_host and client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3159,7 +3389,8 @@ async def events_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    client_host = ws.client.host if ws.client else ""
+    if client_host and client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3209,6 +3440,7 @@ def mount_spa(application: FastAPI):
         return
 
     _index_path = WEB_DIST / "index.html"
+    _studio_index_path = WEB_DIST / "studio.html"
 
     def _serve_index():
         """Return index.html with the session token injected."""
@@ -3224,10 +3456,41 @@ def mount_spa(application: FastAPI):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
+    def _serve_studio_index():
+        """Return the Studio-only SPA when present."""
+        if _studio_index_path.exists():
+            html = _studio_index_path.read_text()
+            chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+            initial_space_script = ""
+            try:
+                from tools.studio_widgets import get_space
+
+                initial_space_json = json.dumps(get_space("default")).replace("<", "\\u003c")
+                initial_space_script = (
+                    "<script>"
+                    f"window.__HERMES_STUDIO_INITIAL_SPACE__={initial_space_json};"
+                    "</script>"
+                )
+            except Exception:
+                _log.exception("Could not embed Studio initial space snapshot")
+            token_script = (
+                f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
+                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};</script>"
+            )
+            html = html.replace("</head>", f"{initial_space_script}{token_script}</head>", 1)
+            return HTMLResponse(
+                html,
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+        return _serve_index()
+
     application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        if full_path == "studio-app" or full_path.startswith("studio-app/"):
+            return _serve_studio_index()
+
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (
@@ -3236,7 +3499,10 @@ def mount_spa(application: FastAPI):
             and file_path.exists()
             and file_path.is_file()
         ):
-            return FileResponse(file_path)
+            return FileResponse(
+                file_path,
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
         return _serve_index()
 
 
@@ -3503,7 +3769,7 @@ async def get_dashboard_themes():
     them without a stub.
     """
     config = load_config()
-    active = cfg_get(config, "dashboard", "theme", default="default")
+    active = config.get("dashboard", {}).get("theme", "default")
     user_themes = _discover_user_themes()
     seen = set()
     themes = []
@@ -3553,12 +3819,10 @@ def _discover_dashboard_plugins() -> list:
     plugins = []
     seen_names: set = set()
 
-    from hermes_cli.plugins import get_bundled_plugins_dir
-    bundled_root = get_bundled_plugins_dir()
     search_dirs = [
         (get_hermes_home() / "plugins", "user"),
-        (bundled_root / "memory", "bundled"),
-        (bundled_root, "bundled"),
+        (PROJECT_ROOT / "plugins" / "memory", "bundled"),
+        (PROJECT_ROOT / "plugins", "bundled"),
     ]
     if os.environ.get("HERMES_ENABLE_PROJECT_PLUGINS"):
         search_dirs.append((Path.cwd() / ".hermes" / "plugins", "project"))
@@ -3633,16 +3897,12 @@ def _get_dashboard_plugins(force_rescan: bool = False) -> list:
 
 @app.get("/api/dashboard/plugins")
 async def get_dashboard_plugins():
-    """Return discovered dashboard plugins (excludes user-hidden ones)."""
+    """Return discovered dashboard plugins."""
     plugins = _get_dashboard_plugins()
-    # Read user's hidden plugins list from config.
-    config = load_config()
-    hidden: list = cfg_get(config, "dashboard", "hidden_plugins", default=[]) or []
-    # Strip internal fields before sending to frontend and filter out hidden.
+    # Strip internal fields before sending to frontend.
     return [
         {k: v for k, v in p.items() if not k.startswith("_")}
         for p in plugins
-        if p["name"] not in hidden
     ]
 
 
@@ -3651,268 +3911,6 @@ async def rescan_dashboard_plugins():
     """Force re-scan of dashboard plugins."""
     plugins = _get_dashboard_plugins(force_rescan=True)
     return {"ok": True, "count": len(plugins)}
-
-
-class _AgentPluginInstallBody(BaseModel):
-    identifier: str
-    force: bool = False
-    enable: bool = True
-
-
-def _strip_dashboard_manifest(p: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in p.items() if not k.startswith("_")}
-
-
-def _merged_plugins_hub() -> Dict[str, Any]:
-    """Agent discovery + dashboard manifests + optional provider picker metadata."""
-    from hermes_cli.plugins_cmd import (
-        _discover_all_plugins,
-        _get_current_context_engine,
-        _get_current_memory_provider,
-        _discover_context_engines,
-        _discover_memory_providers,
-        _get_disabled_set,
-        _get_enabled_set,
-        _read_manifest as _read_plugin_manifest_at,
-    )
-
-    dashboard_list = _get_dashboard_plugins()
-    dash_by_name = {str(p["name"]): p for p in dashboard_list}
-
-    disabled_set = _get_disabled_set()
-    enabled_set = _get_enabled_set()
-
-    # Read user-hidden plugins from config for the user_hidden field.
-    config = load_config()
-    hidden_plugins: list = cfg_get(config, "dashboard", "hidden_plugins", default=[]) or []
-
-    plugins_root_resolved = (get_hermes_home() / "plugins").resolve()
-    rows: List[Dict[str, Any]] = []
-
-    for name, version, description, source, dir_str in _discover_all_plugins():
-        if name in disabled_set:
-            runtime_status = "disabled"
-        elif name in enabled_set:
-            runtime_status = "enabled"
-        else:
-            runtime_status = "inactive"
-
-        dir_path = Path(dir_str)
-        dm = dash_by_name.get(name)
-        has_dash_manifest = dm is not None or (dir_path / "dashboard" / "manifest.json").exists()
-
-        under_user_tree = False
-        try:
-            dir_path.resolve().relative_to(plugins_root_resolved)
-            under_user_tree = True
-        except ValueError:
-            pass
-
-        can_remove_update = (
-            source in ("user", "git") and under_user_tree and Path(dir_str).is_dir()
-        )
-
-        # Check if this plugin provides tools that require auth
-        auth_required = False
-        auth_command = ""
-        manifest_data = _read_plugin_manifest_at(dir_path)
-        provides_tools = manifest_data.get("provides_tools") or []
-        if provides_tools:
-            try:
-                from tools.registry import registry
-                for tname in provides_tools:
-                    entry = registry.get_entry(tname)
-                    if entry and entry.check_fn and not entry.check_fn():
-                        auth_required = True
-                        auth_command = f"hermes auth {name}"
-                        break
-            except Exception:
-                pass
-
-        rows.append({
-            "name": name,
-            "version": version or "",
-            "description": description or "",
-            "source": source,
-            "runtime_status": runtime_status,
-            "has_dashboard_manifest": has_dash_manifest,
-            "dashboard_manifest": _strip_dashboard_manifest(dm) if dm else None,
-            "path": dir_str,
-            "can_remove": can_remove_update,
-            "can_update_git": can_remove_update and (Path(dir_str) / ".git").exists(),
-            "auth_required": auth_required,
-            "auth_command": auth_command,
-            "user_hidden": name in hidden_plugins,
-        })
-
-    agent_names = {r["name"] for r in rows}
-    orphan_dashboard = [
-        _strip_dashboard_manifest(p)
-        for p in dashboard_list
-        if str(p["name"]) not in agent_names
-    ]
-
-    memory_providers: List[Dict[str, str]] = []
-    try:
-        for n, desc in _discover_memory_providers():
-            memory_providers.append({"name": n, "description": desc})
-    except Exception:
-        memory_providers = []
-
-    context_engines: List[Dict[str, str]] = []
-    try:
-        for n, desc in _discover_context_engines():
-            context_engines.append({"name": n, "description": desc})
-    except Exception:
-        context_engines = []
-
-    return {
-        "plugins": rows,
-        "orphan_dashboard_plugins": orphan_dashboard,
-        "providers": {
-            "memory_provider": _get_current_memory_provider() or "",
-            "memory_options": memory_providers,
-            "context_engine": _get_current_context_engine(),
-            "context_options": context_engines,
-        },
-    }
-
-
-@app.get("/api/dashboard/plugins/hub")
-async def get_plugins_hub(request: Request):
-    """Unified agent plugins + dashboard extension metadata (session protected)."""
-    _require_token(request)
-    try:
-        return _merged_plugins_hub()
-    except Exception as exc:
-        _log.warning("plugins/hub failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to build plugins hub.") from exc
-
-
-@app.post("/api/dashboard/agent-plugins/install")
-async def post_agent_plugin_install(request: Request, body: _AgentPluginInstallBody):
-    _require_token(request)
-    from hermes_cli.plugins_cmd import dashboard_install_plugin
-
-    result = dashboard_install_plugin(
-        body.identifier.strip(),
-        force=body.force,
-        enable=body.enable,
-    )
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=400,
-            detail=result.get("error") or "Install failed.",
-        )
-    _get_dashboard_plugins(force_rescan=True)
-    # Strip internal paths from the response
-    result.pop("after_install_path", None)
-    return result
-
-
-def _validate_plugin_name(name: str) -> str:
-    """Reject path-traversal attempts in plugin name URL parameters."""
-    if not name or "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="Invalid plugin name.")
-    return name
-
-
-@app.post("/api/dashboard/agent-plugins/{name}/enable")
-async def post_agent_plugin_enable(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
-    from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    result = dashboard_set_agent_plugin_enabled(name, enabled=True)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Enable failed.")
-    return result
-
-
-@app.post("/api/dashboard/agent-plugins/{name}/disable")
-async def post_agent_plugin_disable(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
-    from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    result = dashboard_set_agent_plugin_enabled(name, enabled=False)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Disable failed.")
-    return result
-
-
-@app.post("/api/dashboard/agent-plugins/{name}/update")
-async def post_agent_plugin_update(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
-    from hermes_cli.plugins_cmd import dashboard_update_user_plugin
-
-    result = dashboard_update_user_plugin(name)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Update failed.")
-    _get_dashboard_plugins(force_rescan=True)
-    return result
-
-
-@app.delete("/api/dashboard/agent-plugins/{name}")
-async def delete_agent_plugin(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
-    from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
-
-    result = dashboard_remove_user_plugin(name)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Remove failed.")
-    _get_dashboard_plugins(force_rescan=True)
-    return result
-
-
-class _PluginProvidersPutBody(BaseModel):
-    memory_provider: Optional[str] = None
-    context_engine: Optional[str] = None
-
-
-@app.put("/api/dashboard/plugin-providers")
-async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
-    """Persist memory provider / context engine selection (writes config.yaml)."""
-    _require_token(request)
-    from hermes_cli.plugins_cmd import (
-        _save_context_engine,
-        _save_memory_provider,
-    )
-
-    if body.memory_provider is not None:
-        _save_memory_provider(body.memory_provider)
-    if body.context_engine is not None:
-        _save_context_engine(body.context_engine)
-    return {"ok": True}
-
-
-class _PluginVisibilityBody(BaseModel):
-    hidden: bool
-
-
-@app.post("/api/dashboard/plugins/{name}/visibility")
-async def post_plugin_visibility(request: Request, name: str, body: _PluginVisibilityBody):
-    """Toggle a plugin's sidebar visibility (persists to config.yaml dashboard.hidden_plugins)."""
-    _require_token(request)
-    name = _validate_plugin_name(name)
-
-    config = load_config()
-    if "dashboard" not in config or not isinstance(config.get("dashboard"), dict):
-        config["dashboard"] = {}
-    hidden_list: list = config["dashboard"].get("hidden_plugins") or []
-    if not isinstance(hidden_list, list):
-        hidden_list = []
-
-    if body.hidden and name not in hidden_list:
-        hidden_list.append(name)
-    elif not body.hidden and name in hidden_list:
-        hidden_list.remove(name)
-
-    config["dashboard"]["hidden_plugins"] = hidden_list
-    save_config(config)
-    return {"ok": True, "name": name, "hidden": body.hidden}
 
 
 @app.get("/dashboard-plugins/{plugin_name}/{file_path:path}")
@@ -3969,23 +3967,13 @@ def _mount_plugin_api_routes():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
         try:
-            module_name = f"hermes_dashboard_plugin_{plugin['name']}"
-            spec = importlib.util.spec_from_file_location(module_name, api_path)
+            spec = importlib.util.spec_from_file_location(
+                f"hermes_dashboard_plugin_{plugin['name']}", api_path,
+            )
             if spec is None or spec.loader is None:
                 continue
             mod = importlib.util.module_from_spec(spec)
-            # Register in sys.modules BEFORE exec_module so pydantic/FastAPI
-            # can resolve forward references (e.g. models defined in a file
-            # that uses `from __future__ import annotations`). Without this,
-            # TypeAdapter lazy-build fails at first request with
-            # "is not fully defined" because the module namespace isn't
-            # reachable by name for string-annotation resolution.
-            sys.modules[module_name] = mod
-            try:
-                spec.loader.exec_module(mod)
-            except Exception:
-                sys.modules.pop(module_name, None)
-                raise
+            spec.loader.exec_module(mod)
             router = getattr(mod, "router", None)
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
@@ -3997,6 +3985,154 @@ def _mount_plugin_api_routes():
 
 
 # Mount plugin API routes before the SPA catch-all.
+
+
+# ---------------------------------------------------------------------------
+# Agent plugin management endpoints (install, enable, disable, update, remove)
+# ---------------------------------------------------------------------------
+
+class _AgentPluginInstallRequest(BaseModel):
+    identifier: str
+    force: bool = False
+    enable: bool = True
+
+
+@app.post("/api/dashboard/agent-plugins/install")
+async def install_agent_plugin(body: _AgentPluginInstallRequest):
+    """Install an agent plugin from a git identifier or URL."""
+    from hermes_cli.plugins_cmd import dashboard_install_plugin
+    result = dashboard_install_plugin(
+        body.identifier,
+        force=body.force,
+        enable=body.enable,
+    )
+    if not result.get("ok"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=result.get("error", "Install failed"))
+    return result
+
+
+@app.post("/api/dashboard/agent-plugins/{name}/enable")
+async def enable_agent_plugin(name: str):
+    """Enable an installed agent plugin."""
+    from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
+    return dashboard_set_agent_plugin_enabled(name, enabled=True)
+
+
+@app.post("/api/dashboard/agent-plugins/{name}/disable")
+async def disable_agent_plugin(name: str):
+    """Disable an installed agent plugin."""
+    from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
+    return dashboard_set_agent_plugin_enabled(name, enabled=False)
+
+
+@app.post("/api/dashboard/agent-plugins/{name}/update")
+async def update_agent_plugin(name: str):
+    """Update an installed user agent plugin via git pull."""
+    from hermes_cli.plugins_cmd import dashboard_update_user_plugin
+    return dashboard_update_user_plugin(name)
+
+
+@app.delete("/api/dashboard/agent-plugins/{name}")
+async def remove_agent_plugin(name: str):
+    """Remove a user-installed agent plugin."""
+    from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
+    return dashboard_remove_user_plugin(name)
+
+
+# ---------------------------------------------------------------------------
+# Profiles endpoints (multi-agent tab)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/profiles")
+async def get_profiles():
+    """List all Hermes profiles."""
+    from hermes_cli.profiles import list_profiles
+    profiles = list_profiles()
+    return {
+        "profiles": [
+            {
+                "name": p.name,
+                "path": str(p.path),
+                "is_default": p.is_default,
+                "gateway_running": p.gateway_running,
+                "model": p.model,
+                "provider": p.provider,
+                "has_env": p.has_env,
+                "skill_count": p.skill_count,
+            }
+            for p in profiles
+        ]
+    }
+
+
+@app.post("/api/profiles")
+async def create_profile_endpoint(body: dict):
+    """Create a new Hermes profile."""
+    from hermes_cli.profiles import create_profile
+    name = body.get("name", "")
+    if not name:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Profile name is required.")
+    try:
+        profile_dir = create_profile(name)
+        return {"ok": True, "name": name, "path": str(profile_dir)}
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/profiles/{name}")
+async def delete_profile_endpoint(name: str):
+    """Delete a Hermes profile."""
+    from hermes_cli.profiles import delete_profile
+    try:
+        profile_dir = delete_profile(name, yes=True)
+        return {"ok": True, "name": name, "path": str(profile_dir)}
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/profiles/{name}/setup-command")
+async def get_profile_setup_command(name: str):
+    """Return the shell command to start a gateway for a profile."""
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(name) and name != "default":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found.")
+    profile_dir = get_profile_dir(name)
+    cmd = f"HERMES_HOME={profile_dir} hermes gateway run"
+    return {"command": cmd}
+
+
+@app.get("/api/profiles/{name}/soul")
+async def get_profile_soul(name: str):
+    """Return the soul/system-prompt content for a profile."""
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(name) and name != "default":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found.")
+    soul_path = get_profile_dir(name) / "soul.md"
+    if not soul_path.exists():
+        return {"content": ""}
+    return {"content": soul_path.read_text()}
+
+
+@app.put("/api/profiles/{name}/soul")
+async def update_profile_soul(name: str, body: dict):
+    """Update the soul/system-prompt content for a profile."""
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(name) and name != "default":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found.")
+    soul_path = get_profile_dir(name) / "soul.md"
+    content = body.get("content", "")
+    soul_path.write_text(content)
+    return {"ok": True}
+
+
 _mount_plugin_api_routes()
 
 mount_spa(app)

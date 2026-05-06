@@ -1,0 +1,402 @@
+cols: 4
+id: tetris-game
+name: Tetris
+renderer: |
+  async (parent, spaceRef) => {
+      parent.style.cssText = "position:relative;overflow:hidden;height:100%;background:#0a0a0f;border-radius:8px;display:flex;flex-direction:row;align-items:stretch;font-family:monospace;user-select:none;outline:none;box-sizing:border-box;";
+      parent.setAttribute("tabindex", "0");
+  
+      // ── Music ──────────────────────────────────────────────────────────────
+      const MUSIC = {
+        tempoBpm: 150, loop: { lengthBeats: 32 },
+        synth: { attackSec:0.012, releaseSec:0.012, subSemitones:-12, subMix:0.03, triangleMix:0.05 },
+        notes: [
+          {pitch:76,time:0.0,duration:1.0},{pitch:71,time:1.0,duration:0.5},{pitch:72,time:1.5,duration:0.5},
+          {pitch:74,time:2.0,duration:1.0},{pitch:72,time:3.0,duration:0.5},{pitch:71,time:3.5,duration:0.5},
+          {pitch:69,time:4.0,duration:1.0},{pitch:69,time:5.0,duration:0.5},{pitch:72,time:5.5,duration:0.5},
+          {pitch:76,time:6.0,duration:1.0},{pitch:74,time:7.0,duration:0.5},{pitch:72,time:7.5,duration:0.5},
+          {pitch:71,time:8.0,duration:1.5},{pitch:72,time:9.5,duration:0.5},{pitch:74,time:10.0,duration:1.0},
+          {pitch:76,time:11.0,duration:1.0},{pitch:72,time:12.0,duration:1.0},{pitch:69,time:13.0,duration:1.0},
+          {pitch:69,time:14.0,duration:2.0},{pitch:74,time:16.0,duration:1.5},{pitch:77,time:17.5,duration:0.5},
+          {pitch:81,time:18.0,duration:1.0},{pitch:79,time:19.0,duration:0.5},{pitch:77,time:19.5,duration:0.5},
+          {pitch:76,time:20.0,duration:1.5},{pitch:72,time:21.5,duration:0.5},{pitch:76,time:22.0,duration:1.0},
+          {pitch:74,time:23.0,duration:0.5},{pitch:72,time:23.5,duration:0.5},{pitch:71,time:24.0,duration:1.5},
+          {pitch:71,time:25.5,duration:0.5},{pitch:72,time:26.0,duration:1.0},{pitch:74,time:27.0,duration:1.0},
+          {pitch:76,time:28.0,duration:1.0},{pitch:72,time:29.0,duration:1.0},{pitch:69,time:30.0,duration:2.0},
+        ]
+      };
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      let audioCtx=null, masterGain=null, musicPlaying=false, loopTimeout=null, scheduledOscs=[], currentVol=0.25;
+      const midiToHz = p => 440 * Math.pow(2,(p-69)/12);
+  
+      function startMusic(vol) {
+        if (!audioCtx) { audioCtx=new AudioCtx(); masterGain=audioCtx.createGain(); masterGain.connect(audioCtx.destination); }
+        masterGain.gain.value=vol; stopMusic(); musicPlaying=true; scheduleLoop(audioCtx.currentTime+0.05);
+      }
+      function scheduleLoop(loopStart) {
+        if (!musicPlaying) return;
+        const beatSec=60/MUSIC.tempoBpm, loopLenSec=MUSIC.loop.lengthBeats*beatSec;
+        const {attackSec,releaseSec,subMix,triangleMix,subSemitones}=MUSIC.synth;
+        scheduledOscs=[];
+        MUSIC.notes.forEach(note=>{
+          const t=loopStart+note.time*beatSec, durSec=note.duration*beatSec, freq=midiToHz(note.pitch);
+          const mkOsc=(type,f,g)=>{
+            const o=audioCtx.createOscillator(),gn=audioCtx.createGain();
+            o.type=type; o.frequency.value=f;
+            gn.gain.setValueAtTime(0,t);
+            gn.gain.linearRampToValueAtTime(g,t+attackSec);
+            gn.gain.setValueAtTime(g,t+durSec-releaseSec);
+            gn.gain.linearRampToValueAtTime(0,t+durSec);
+            o.connect(gn); gn.connect(masterGain); o.start(t); o.stop(t+durSec); scheduledOscs.push(o);
+          };
+          mkOsc("sine",freq,1.0-triangleMix-subMix);
+          if(triangleMix>0) mkOsc("triangle",freq,triangleMix);
+          if(subMix>0) mkOsc("sine",midiToHz(note.pitch+subSemitones),subMix);
+        });
+        loopTimeout=setTimeout(()=>{ if(musicPlaying) scheduleLoop(loopStart+loopLenSec); },(loopLenSec-0.1)*1000);
+      }
+      function stopMusic() {
+        musicPlaying=false;
+        if(loopTimeout){clearTimeout(loopTimeout);loopTimeout=null;}
+        scheduledOscs.forEach(o=>{try{o.stop();}catch(e){}});
+        scheduledOscs=[];
+      }
+  
+      // ── DOM ────────────────────────────────────────────────────────────────
+      const GW=10, GH=20;
+  
+      // All game state in one object — no stale closure refs
+      const G = {
+        board:null, current:null, next:null,
+        score:0, level:1, lines:0,
+        gameOver:false, paused:false, started:false,
+        tick:800, lastDrop:0, dropTimer:null
+      };
+  
+      let cellSize=16;
+      let scoreEl=null, levelEl=null, linesEl=null, nextCvs=null, pauseBtn=null;
+  
+      const canvasWrap=document.createElement("div");
+      canvasWrap.style.cssText="flex:0 0 auto;display:flex;align-items:flex-start;justify-content:center;overflow:hidden;position:relative;";
+      parent.appendChild(canvasWrap);
+  
+      const canvas=document.createElement("canvas");
+      canvasWrap.appendChild(canvas);
+  
+      const overlay=document.createElement("div");
+      overlay.style.cssText="position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(0,0,0,0.75);z-index:10;";
+      canvasWrap.appendChild(overlay);
+  
+      const side=document.createElement("div");
+      side.style.cssText="flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:space-evenly;padding:4px 2px;background:#0d0d18;min-width:0;overflow:hidden;box-sizing:border-box;";
+      parent.appendChild(side);
+  
+      function buildSide(cs) {
+        side.innerHTML="";
+        const fs=Math.max(9,Math.min(Math.round(cs*1.1),22));
+        const fsS=Math.max(7,Math.min(Math.round(cs*0.72),15));
+        const block=label=>{
+          const d=document.createElement("div");
+          d.style.cssText="width:100%;text-align:center;line-height:1.2;";
+          const l=document.createElement("div");
+          l.style.cssText=`color:#555;font-size:${fsS}px;text-transform:uppercase;letter-spacing:0.06em;`;
+          l.textContent=label;
+          const v=document.createElement("div");
+          v.style.cssText=`color:#fff;font-size:${fs}px;font-weight:bold;`;
+          v.textContent="0"; d.appendChild(l); d.appendChild(v);
+          return {wrap:d,val:v};
+        };
+        const sb=block("SCR"); scoreEl=sb.val; side.appendChild(sb.wrap);
+        const lb=block("LVL"); levelEl=lb.val; side.appendChild(lb.wrap);
+        const nb=block("LNS"); linesEl=nb.val; side.appendChild(nb.wrap);
+        const nl=document.createElement("div");
+        nl.style.cssText=`color:#555;font-size:${fsS}px;text-transform:uppercase;letter-spacing:0.06em;text-align:center;`;
+        nl.textContent="NEXT"; side.appendChild(nl);
+        nextCvs=document.createElement("canvas");
+        const ncs=Math.max(6,Math.min(Math.round(cs*0.9),14));
+        nextCvs.width=ncs*4; nextCvs.height=ncs*4;
+        nextCvs.style.cssText="background:#111;border-radius:3px;";
+        side.appendChild(nextCvs);
+        const btnRow=document.createElement("div");
+        btnRow.style.cssText="display:flex;gap:4px;width:100%;justify-content:center;";
+        const mkBtn=(icon,cb)=>{
+          const b=document.createElement("button");
+          b.textContent=icon;
+          b.style.cssText=`background:#1a1a2e;color:#fff;border:1px solid #333;border-radius:4px;padding:2px 5px;font-size:${fs}px;cursor:pointer;line-height:1;`;
+          b.addEventListener("mousedown",e=>{e.preventDefault();e.stopPropagation();cb();}); return b;
+        };
+        pauseBtn=mkBtn("⏸",()=>togglePause());
+        btnRow.appendChild(pauseBtn);
+        btnRow.appendChild(mkBtn("↺",()=>resetGame()));
+        side.appendChild(btnRow);
+        const volWrap=document.createElement("div");
+        volWrap.style.cssText="width:100%;display:flex;flex-direction:column;align-items:center;gap:1px;";
+        const vl=document.createElement("div");
+        vl.style.cssText=`color:#555;font-size:${fsS}px;text-transform:uppercase;`;
+        vl.textContent="VOL";
+        const vs=document.createElement("input");
+        vs.type="range"; vs.min=0; vs.max=1; vs.step=0.05; vs.value=currentVol;
+        vs.style.cssText="width:90%;accent-color:#00d4ff;margin:0;";
+        vs.addEventListener("input",()=>{ currentVol=parseFloat(vs.value); if(masterGain) masterGain.gain.value=currentVol; });
+        volWrap.appendChild(vl); volWrap.appendChild(vs); side.appendChild(volWrap);
+        const hint=document.createElement("div");
+        hint.style.cssText=`color:#3a3a5a;font-size:${Math.max(5,fsS-2)}px;line-height:1.5;text-align:center;`;
+        hint.innerHTML="←→ move<br>↑ rotate<br>↓ soft · SPC drop<br>P pause";
+        side.appendChild(hint);
+        updateSide();
+        if(G.next) drawNext(); // ← use G.next, not bare `next`
+      }
+  
+      // ── Overlay ────────────────────────────────────────────────────────────
+      function showOverlay(state) {
+        overlay.innerHTML="";
+        const fs=Math.max(10,Math.min(cellSize*1.1,22));
+        const fsS=Math.max(8,Math.min(cellSize*0.8,16));
+        const mkObtn=(label,color,cb)=>{
+          const b=document.createElement("button");
+          b.textContent=label;
+          b.style.cssText=`background:${color}22;color:${color};border:2px solid ${color};border-radius:6px;padding:6px 14px;font-size:${fsS}px;font-family:monospace;cursor:pointer;letter-spacing:0.08em;margin-top:4px;`;
+          b.addEventListener("mousedown",e=>{e.preventDefault();e.stopPropagation();cb();}); return b;
+        };
+        if(state==="hidden"){ overlay.style.display="none"; return; }
+        overlay.style.display="flex";
+        if(state==="start"){
+          const t=document.createElement("div");
+          t.style.cssText=`color:#00d4ff;font-size:${fs*1.4}px;font-weight:bold;letter-spacing:0.12em;text-shadow:0 0 14px #00d4ff99;`;
+          t.textContent="TETRIS"; overlay.appendChild(t);
+          overlay.appendChild(mkObtn("▶  START","#00d4ff",()=>startGame()));
+        } else if(state==="paused"){
+          const t=document.createElement("div");
+          t.style.cssText=`color:#fff;font-size:${fs}px;font-weight:bold;`;
+          t.textContent="PAUSED"; overlay.appendChild(t);
+          overlay.appendChild(mkObtn("▶  RESUME","#ffffff",()=>togglePause()));
+        } else if(state==="gameover"){
+          const t=document.createElement("div");
+          t.style.cssText=`color:#ff4444;font-size:${fs*1.1}px;font-weight:bold;`;
+          t.textContent="GAME OVER"; overlay.appendChild(t);
+          const sc=document.createElement("div");
+          sc.style.cssText=`color:#aaa;font-size:${fsS}px;`;
+          sc.textContent=`Score: ${G.score}`; overlay.appendChild(sc);
+          overlay.appendChild(mkObtn("↺  RESTART","#ff6666",()=>resetGame()));
+        }
+      }
+  
+      // ── Pieces ─────────────────────────────────────────────────────────────
+      const PIECES=[
+        {shape:[[1,1,1,1]],color:"#00f0f0"},
+        {shape:[[1,1],[1,1]],color:"#f0f000"},
+        {shape:[[0,1,0],[1,1,1]],color:"#c000f0"},
+        {shape:[[1,0,0],[1,1,1]],color:"#f0a000"},
+        {shape:[[0,0,1],[1,1,1]],color:"#4466ff"},
+        {shape:[[0,1,1],[1,1,0]],color:"#00e000"},
+        {shape:[[1,1,0],[0,1,1]],color:"#f03030"},
+      ];
+      const rotate=s=>s[0].map((_,i)=>s.map(r=>r[i]).reverse());
+      const tickForLevel=l=>Math.max(80,800-(l-1)*70);
+  
+      function newPiece(){
+        const p=PIECES[Math.floor(Math.random()*PIECES.length)];
+        return {shape:p.shape.map(r=>[...r]),color:p.color,x:Math.floor(GW/2)-Math.floor(p.shape[0].length/2),y:0};
+      }
+  
+      function resetGame(){
+        stopMusic();
+        if(G.dropTimer){clearInterval(G.dropTimer);G.dropTimer=null;}
+        G.board=Array.from({length:GH},()=>Array(GW).fill(null));
+        G.current=newPiece(); G.next=newPiece();
+        G.score=0; G.level=1; G.lines=0;
+        G.gameOver=false; G.paused=false; G.started=false;
+        G.tick=tickForLevel(1); G.lastDrop=0;
+        if(pauseBtn) pauseBtn.textContent="⏸";
+        updateSide(); drawBoard(); showOverlay("start");
+      }
+  
+      function startGame(){
+        if(G.dropTimer){clearInterval(G.dropTimer);G.dropTimer=null;}
+        G.board=Array.from({length:GH},()=>Array(GW).fill(null));
+        G.current=newPiece(); G.next=newPiece();
+        G.score=0; G.level=1; G.lines=0;
+        G.gameOver=false; G.paused=false; G.started=true;
+        G.tick=tickForLevel(1); G.lastDrop=Date.now();
+        if(pauseBtn) pauseBtn.textContent="⏸";
+        updateSide(); showOverlay("hidden");
+        G.dropTimer=setInterval(gameTick,16);
+        startMusic(currentVol);
+        parent.focus();
+      }
+  
+      function updateSide(){
+        if(scoreEl) scoreEl.textContent=G.score;
+        if(levelEl) levelEl.textContent=G.level;
+        if(linesEl) linesEl.textContent=G.lines;
+      }
+  
+      function valid(shape,ox,oy){
+        for(let r=0;r<shape.length;r++) for(let c=0;c<shape[r].length;c++){
+          if(!shape[r][c]) continue;
+          const nx=ox+c,ny=oy+r;
+          if(nx<0||nx>=GW||ny>=GH) return false;
+          if(ny>=0&&G.board[ny][nx]) return false;
+        }
+        return true;
+      }
+  
+      function clearLines(){
+        let cleared=0;
+        for(let r=GH-1;r>=0;){
+          if(G.board[r].every(cell=>cell!==null)){
+            G.board.splice(r,1); G.board.unshift(Array(GW).fill(null)); cleared++;
+          } else { r--; }
+        }
+        return cleared;
+      }
+  
+      function place(){
+        G.current.shape.forEach((row,r)=>row.forEach((v,c)=>{
+          if(v){ const ny=G.current.y+r,nx=G.current.x+c; if(ny>=0&&ny<GH&&nx>=0&&nx<GW) G.board[ny][nx]=G.current.color; }
+        }));
+        const cleared=clearLines();
+        if(cleared>0){
+          G.score+=[0,100,300,500,800][Math.min(cleared,4)]*G.level;
+          G.lines+=cleared;
+          G.level=Math.floor(G.lines/10)+1;
+          G.tick=tickForLevel(G.level);
+        }
+        updateSide();
+        G.current=G.next; G.next=newPiece();
+        if(!valid(G.current.shape,G.current.x,G.current.y)){
+          G.gameOver=true; G.started=false; stopMusic();
+          if(G.dropTimer){clearInterval(G.dropTimer);G.dropTimer=null;}
+          drawBoard(); showOverlay("gameover");
+        }
+      }
+  
+      function gameTick(){
+        if(!G.started||G.paused||G.gameOver) return;
+        const now=Date.now();
+        if(now-G.lastDrop>=G.tick){
+          G.lastDrop=now;
+          if(valid(G.current.shape,G.current.x,G.current.y+1)) G.current.y++;
+          else place();
+        }
+        draw();
+      }
+  
+      function hardDrop(){
+        while(valid(G.current.shape,G.current.x,G.current.y+1)) G.current.y++;
+        place(); draw();
+      }
+      function ghostY(){ let g=G.current.y; while(valid(G.current.shape,G.current.x,g+1)) g++; return g; }
+  
+      function togglePause(){
+        if(!G.started||G.gameOver) return;
+        G.paused=!G.paused;
+        if(pauseBtn) pauseBtn.textContent=G.paused?"▶":"⏸";
+        if(G.paused){ stopMusic(); showOverlay("paused"); }
+        else { showOverlay("hidden"); startMusic(currentVol); }
+      }
+  
+      // ── Draw ───────────────────────────────────────────────────────────────
+      function drawCell(ctx,x,y,color,alpha=1){
+        ctx.globalAlpha=alpha;
+        ctx.fillStyle=color;
+        ctx.fillRect(x*cellSize+1,y*cellSize+1,cellSize-2,cellSize-2);
+        ctx.fillStyle="rgba(255,255,255,0.22)";
+        ctx.fillRect(x*cellSize+1,y*cellSize+1,cellSize-2,Math.max(2,Math.floor(cellSize*0.18)));
+        ctx.globalAlpha=1;
+      }
+      function drawNext(){
+        if(!nextCvs||!G.next) return;
+        const nc=nextCvs.getContext("2d"),ncs=Math.floor(nextCvs.width/4);
+        nc.fillStyle="#111"; nc.fillRect(0,0,nextCvs.width,nextCvs.height);
+        const ox=Math.floor((4-G.next.shape[0].length)/2),oy=Math.floor((4-G.next.shape.length)/2);
+        G.next.shape.forEach((row,r)=>row.forEach((v,c)=>{
+          if(!v) return;
+          nc.fillStyle=G.next.color; nc.fillRect((ox+c)*ncs+1,(oy+r)*ncs+1,ncs-2,ncs-2);
+          nc.fillStyle="rgba(255,255,255,0.22)"; nc.fillRect((ox+c)*ncs+1,(oy+r)*ncs+1,ncs-2,2);
+        }));
+      }
+      function drawBoard(){
+        if(!G.board) return;
+        const ctx=canvas.getContext("2d");
+        ctx.fillStyle="#111318"; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.strokeStyle="#1e2030"; ctx.lineWidth=0.5;
+        for(let r=0;r<GH;r++) for(let c=0;c<GW;c++) ctx.strokeRect(c*cellSize,r*cellSize,cellSize,cellSize);
+        for(let r=0;r<GH;r++) for(let c=0;c<GW;c++) if(G.board[r][c]) drawCell(ctx,c,r,G.board[r][c]);
+      }
+      function draw(){
+        if(!G.current||!G.next||!G.board) return;
+        drawBoard();
+        const ctx=canvas.getContext("2d");
+        const gy=ghostY();
+        if(gy!==G.current.y) G.current.shape.forEach((row,r)=>row.forEach((v,c)=>{if(v) drawCell(ctx,G.current.x+c,gy+r,G.current.color,0.42);}));
+        G.current.shape.forEach((row,r)=>row.forEach((v,c)=>{if(v) drawCell(ctx,G.current.x+c,G.current.y+r,G.current.color);}));
+        drawNext();
+      }
+  
+      // ── Resize ─────────────────────────────────────────────────────────────
+      function resize(){
+        const availW=parent.clientWidth||parent.offsetWidth||200;
+        const availH=parent.clientHeight||parent.offsetHeight||300;
+        cellSize=Math.max(4,Math.min(Math.floor(availW*0.70/GW),Math.floor(availH/GH)));
+        canvas.width=GW*cellSize; canvas.height=GH*cellSize;
+        canvasWrap.style.width=GW*cellSize+"px";
+        canvasWrap.style.height=availH+"px";
+        buildSide(cellSize);
+        if(G.started&&!G.paused&&!G.gameOver) draw(); else drawBoard();
+      }
+  
+      // ── Focus/blur ─────────────────────────────────────────────────────────
+      const onBlur=()=>{ if(G.started&&!G.paused&&!G.gameOver) togglePause(); };
+      parent.addEventListener("blur",onBlur);
+      parent.addEventListener("click",()=>parent.focus());
+  
+      // ── Keys ───────────────────────────────────────────────────────────────
+      const onKey=e=>{
+        if(!G.started&&!G.gameOver){
+          if(e.code==="Space"||e.code==="Enter"){e.preventDefault();startGame();}
+          return;
+        }
+        if(G.gameOver) return;
+        if(e.code==="KeyP"){e.preventDefault();togglePause();return;}
+        if(G.paused) return;
+        switch(e.code){
+          case "ArrowLeft":  case "KeyA": e.preventDefault(); if(valid(G.current.shape,G.current.x-1,G.current.y)) G.current.x--; break;
+          case "ArrowRight": case "KeyD": e.preventDefault(); if(valid(G.current.shape,G.current.x+1,G.current.y)) G.current.x++; break;
+          case "ArrowUp":    case "KeyW":{
+            e.preventDefault();
+            const r=rotate(G.current.shape);
+            if(valid(r,G.current.x,G.current.y)) G.current.shape=r;
+            else if(valid(r,G.current.x-1,G.current.y)){G.current.shape=r;G.current.x--;}
+            else if(valid(r,G.current.x+1,G.current.y)){G.current.shape=r;G.current.x++;}
+            break;
+          }
+          case "ArrowDown": case "KeyS":
+            e.preventDefault();
+            if(valid(G.current.shape,G.current.x,G.current.y+1)){G.current.y++;G.score++;G.lastDrop=Date.now();updateSide();}
+            break;
+          case "Space": e.preventDefault(); hardDrop(); break;
+        }
+        draw();
+      };
+      parent.addEventListener("keydown",onKey);
+  
+      const ro=new ResizeObserver(()=>resize());
+      ro.observe(parent);
+  
+      resetGame();
+      resize();
+  
+      return ()=>{
+        if(G.dropTimer) clearInterval(G.dropTimer);
+        stopMusic();
+        if(audioCtx){try{audioCtx.close();}catch(e){} audioCtx=null;}
+        ro.disconnect();
+        parent.removeEventListener("keydown",onKey);
+        parent.removeEventListener("blur",onBlur);
+      };
+    }
+rows: 5
+schema: space-widget/v1
+col: -1
+row: -1

@@ -1,0 +1,442 @@
+cols: 5
+id: snake-game
+name: Snake
+renderer: |-
+  async (parent, spaceRef) => {
+      parent.style.cssText = "background:#8a9a5b;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;font-family:'Courier New',monospace;position:relative;overflow:hidden;";
+
+      const screen = document.createElement('div');
+      screen.style.cssText = "position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%;background:#8a9a5b;";
+      parent.appendChild(screen);
+
+      const COLS = 21;
+      const ROWS = 17;
+      const ASPECT = COLS / ROWS;
+      const TOTAL_CELLS = COLS * ROWS;
+
+      const canvas = document.createElement('canvas');
+      canvas.style.cssText = "display:block;outline:none;cursor:pointer;border:2px solid #4a5a2b;box-sizing:border-box;";
+      canvas.setAttribute('tabindex', '0');
+      screen.appendChild(canvas);
+
+      const hud = document.createElement('div');
+      hud.style.cssText = "display:flex;justify-content:space-between;align-items:center;width:100%;padding:3px 8px;box-sizing:border-box;font-size:20px;color:#2a3a0b;font-weight:bold;letter-spacing:1px;flex-shrink:0;";
+      hud.innerHTML = '<span>SNAKE</span><span id="sn-score">00</span><span style="font-size:18px;opacity:0.8;">[P]=pause [R]=reset</span>';
+      screen.appendChild(hud);
+
+      const ctx = canvas.getContext('2d');
+      const scoreEl = hud.querySelector('#sn-score');
+      const DPR = Math.max(1, window.devicePixelRatio || 1);
+      const FRAME_MS = 16;
+      let animRAF = null;
+      let animSeq = 0;
+      let stepSeq = 0;
+      let anim = null;
+
+      const overlay = document.createElement('div');
+      overlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(138,154,91,0.92);z-index:10;";
+      screen.appendChild(overlay);
+
+      const overlayTitle = document.createElement('div');
+      overlayTitle.style.cssText = "font-size:32px;font-weight:bold;color:#1a2a05;letter-spacing:4px;margin-bottom:8px;text-shadow:1px 1px 0 #c8d89b;";
+      overlayTitle.textContent = 'SNAKE';
+      overlay.appendChild(overlayTitle);
+
+      const overlayMsg = document.createElement('div');
+      overlayMsg.style.cssText = "font-size:16px;color:#2a3a0b;margin-bottom:16px;letter-spacing:1px;min-height:20px;text-align:center;";
+      overlayMsg.textContent = 'Arrow keys or WASD to move';
+      overlay.appendChild(overlayMsg);
+
+      const overlayBtn = document.createElement('button');
+      overlayBtn.style.cssText = "background:#2a3a0b;color:#8a9a5b;border:none;padding:10px 28px;font-family:'Courier New',monospace;font-size:20px;font-weight:bold;letter-spacing:2px;cursor:pointer;border-radius:2px;box-shadow:2px 2px 0 #1a2a05;";
+      overlayBtn.textContent = 'START';
+      overlay.appendChild(overlayBtn);
+
+      const hiEl = document.createElement('div');
+      hiEl.style.cssText = "font-size:16px;color:#3a4a1b;margin-top:12px;letter-spacing:1px;min-height:20px;";
+      hiEl.textContent = '';
+      overlay.appendChild(hiEl);
+
+      let snake, dir, nextDir, food, score, hiScore = 0;
+      let running = false, dead = false, paused = false, won = false;
+      let tickTimer = null;
+      let keyHoldStart = null;   // timestamp when current arrow key was first pressed
+      let gracePending = false;  // true when we're in the 1-tick grace period
+      const TICK_MS = 150;
+      const TICK_FAST = 75;
+      const MOVE_MS = 150;
+      const MOVE_EASE = (t) => t * (2 - t);
+      const BULGE_MS = 900;
+      const BULGE_TAIL = 5;
+      let pendingBulge = null;
+      let CELL = 10, W = COLS * CELL, H = ROWS * CELL;
+
+      function resize() {
+        const availW = screen.clientWidth - 4;
+        const availH = screen.clientHeight - hud.offsetHeight - 4;
+        let cw = availW, ch = availH;
+        if (cw / ch > ASPECT) cw = ch * ASPECT;
+        else ch = cw / ASPECT;
+        cw = Math.floor(cw);
+        ch = Math.floor(ch);
+        canvas.style.width = cw + 'px';
+        canvas.style.height = ch + 'px';
+        canvas.width = Math.max(1, Math.floor(cw * DPR));
+        canvas.height = Math.max(1, Math.floor(ch * DPR));
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        W = cw; H = ch;
+        CELL = W / COLS;
+        if (running || paused) draw();
+        else if (!overlay.style.display || overlay.style.display === 'none') draw();
+      }
+
+      const ro = new ResizeObserver(() => resize());
+      ro.observe(screen);
+
+      function rnd(n) { return Math.floor(Math.random() * n); }
+
+      function spawnFood() {
+        if (snake.length >= TOTAL_CELLS) { food = null; return; }
+        let pos;
+        do { pos = { x: rnd(COLS), y: rnd(ROWS) }; }
+        while (snake.some(s => s.x === pos.x && s.y === pos.y));
+        food = pos;
+      }
+
+      function initGame() {
+        const cx = Math.floor(COLS / 2), cy = Math.floor(ROWS / 2);
+        snake = [{ x: cx, y: cy }, { x: cx - 1, y: cy }, { x: cx - 2, y: cy }];
+        dir = { x: 1, y: 0 };
+        nextDir = { x: 1, y: 0 };
+        score = 0;
+        scoreEl.textContent = '00';
+        won = false;
+        dead = false;
+        gracePending = false;
+        pendingBulge = null;
+        keyHoldStart = null;
+        spawnFood();
+      }
+
+      function drawCell(x, y, fill, inset = 0.16) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(x + CELL * inset, y + CELL * inset, CELL * (1 - inset * 2), CELL * (1 - inset * 2));
+      }
+
+      function drawSnakeSegment(seg, i, alpha = 1, scale = 1, offsetX = 0, offsetY = 0) {
+        const cx = seg.x * CELL + CELL / 2 + offsetX * CELL;
+        const cy = seg.y * CELL + CELL / 2 + offsetY * CELL;
+        const size = CELL * scale;
+        const sx = cx - size / 2;
+        const sy = cy - size / 2;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        if (i === 0) {
+          ctx.fillStyle = '#1a2a05';
+          ctx.fillRect(sx, sy, size, size);
+          ctx.fillStyle = '#8a9a5b';
+          const d = dir;
+          const ew = Math.max(1, size * 0.2);
+          if (d.x === 1)       { ctx.fillRect(sx+size*0.7, sy+size*0.2, ew, ew); ctx.fillRect(sx+size*0.7, sy+size*0.6, ew, ew); }
+          else if (d.x === -1) { ctx.fillRect(sx+size*0.1, sy+size*0.2, ew, ew); ctx.fillRect(sx+size*0.1, sy+size*0.6, ew, ew); }
+          else if (d.y === -1) { ctx.fillRect(sx+size*0.2, sy+size*0.1, ew, ew); ctx.fillRect(sx+size*0.6, sy+size*0.1, ew, ew); }
+          else                 { ctx.fillRect(sx+size*0.2, sy+size*0.7, ew, ew); ctx.fillRect(sx+size*0.6, sy+size*0.7, ew, ew); }
+        } else {
+          ctx.fillStyle = '#2a3a0b';
+          ctx.fillRect(sx, sy, size, size);
+          ctx.fillStyle = '#3d5010';
+          ctx.fillRect(sx + size*0.2, sy + size*0.2, size*0.6, size*0.6);
+        }
+        ctx.restore();
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = '#8a9a5b';
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = '#7d8f52';
+        for (let gx = 0; gx < COLS; gx++) {
+          for (let gy = 0; gy < ROWS; gy++) {
+            ctx.fillRect(Math.round(gx * CELL + CELL / 2), Math.round(gy * CELL + CELL / 2), 1, 1);
+          }
+        }
+
+        if (food) {
+          const fx = food.x * CELL, fy = food.y * CELL;
+          ctx.fillStyle = '#1a2a05';
+          ctx.fillRect(fx + CELL*0.2, fy + CELL*0.2, CELL*0.6, CELL*0.6);
+          ctx.fillStyle = '#8a9a5b';
+          ctx.fillRect(fx + CELL/2 - 0.5, fy + CELL*0.2, 1, CELL*0.6);
+          ctx.fillRect(fx + CELL*0.2, fy + CELL/2 - 0.5, CELL*0.6, 1);
+        }
+
+        if (anim && anim.running) {
+          const p = anim.progress;
+          const ease = MOVE_EASE(p);
+          for (let i = anim.from.length - 1; i >= 0; i--) {
+            const from = anim.from[i];
+            const to = anim.to[i] || from;
+            const x = from.x + (to.x - from.x) * ease;
+            const y = from.y + (to.y - from.y) * ease;
+            const bodyPulse = i === anim.growIndex ? 1 + 0.22 * Math.sin(Math.min(1, p) * Math.PI) : 1;
+            const scale = i === 0 ? 1 + 0.14 * Math.sin(Math.min(1, p) * Math.PI) : bodyPulse;
+            drawSnakeSegment({ x, y }, i, 1, scale);
+          }
+        } else {
+          snake.forEach((seg, i) => {
+            const bulge = pendingBulge && i >= pendingBulge.index && i < pendingBulge.index + BULGE_TAIL
+              ? 1 + 0.22 * pendingBulge.strength * (1 - (i - pendingBulge.index) / BULGE_TAIL)
+              : 1;
+            drawSnakeSegment(seg, i, 1, i === 0 ? 1.08 : bulge);
+          });
+        }
+      }
+
+      function drawPause() {
+        if (pendingBulge) pendingBulge.strength = Math.max(0, 1 - (performance.now() - pendingBulge.born) / BULGE_MS);
+        draw();
+        ctx.fillStyle = 'rgba(138,154,91,0.78)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#1a2a05';
+        ctx.textAlign = 'center';
+        ctx.font = `bold ${Math.round(CELL*1.6)}px Courier New`;
+        ctx.fillText('PAUSED', W/2, H/2 - CELL*0.5);
+        ctx.font = `${Math.round(CELL*1.0)}px Courier New`;
+        ctx.fillText('any key to resume', W/2, H/2 + CELL*1.2);
+      }
+
+      function stopAnim() {
+        if (animRAF) cancelAnimationFrame(animRAF);
+        animRAF = null;
+        anim = null;
+      }
+
+      function animateStep(fromSnake, toSnake, toHead, growIndex = -1) {
+        stopAnim();
+        const start = performance.now();
+        anim = { running: true, from: fromSnake, to: toSnake, toHead, growIndex, progress: 0 };
+        const frame = (now) => {
+          if (!anim || !anim.running) return;
+          anim.progress = Math.min(1, (now - start) / MOVE_MS);
+          draw();
+          if (anim.progress < 1) animRAF = requestAnimationFrame(frame);
+          else stopAnim();
+        };
+        animRAF = requestAnimationFrame(frame);
+      }
+
+      function scheduleTick() {
+        if (pendingBulge) {
+          const age = performance.now() - pendingBulge.born;
+          if (age >= BULGE_MS) pendingBulge = null;
+          else pendingBulge.strength = 1 - age / BULGE_MS;
+        }
+        clearTimeout(tickTimer);
+        const fast = keyHoldStart !== null && (Date.now() - keyHoldStart) >= 100;
+        tickTimer = setTimeout(step, fast ? TICK_FAST : TICK_MS);
+      }
+
+      function step() {
+        if (!running) return;
+        stopAnim();
+        dir = { ...nextDir };
+        const fromSnake = snake.map(s => ({ ...s }));
+        const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+        const fatal = head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS
+                      || snake.some(s => s.x === head.x && s.y === head.y);
+        if (fatal) {
+          if (!gracePending) {
+            gracePending = true;
+            draw();
+            scheduleTick();
+            return;
+          }
+          gracePending = false;
+          die();
+          return;
+        }
+        gracePending = false;
+        const ate = food && head.x === food.x && head.y === food.y;
+        const nextSnake = [head, ...snake];
+        if (!ate) nextSnake.pop();
+        else {
+          score++;
+          scoreEl.textContent = String(score).padStart(2, '0');
+          if (score > hiScore) hiScore = score;
+        }
+        const growIndex = ate ? Math.min(nextSnake.length - 1, 2) : -1;
+        snake = nextSnake;
+        if (ate) {
+          pendingBulge = { index: Math.min(Math.max(1, growIndex), snake.length - 1), strength: 1, born: performance.now() };
+          spawnFood();
+          if (snake.length >= TOTAL_CELLS) { draw(); victory(); return; }
+        }
+        animateStep(fromSnake, snake.map(s => ({ ...s })), head, growIndex);
+        scheduleTick();
+      }
+
+      function die() {
+        running = false;
+        dead = true;
+        stopAnim();
+        clearTimeout(tickTimer);
+        let flashes = 0;
+        const flash = setInterval(() => {
+          ctx.fillStyle = flashes % 2 === 0 ? '#1a2a05' : '#8a9a5b';
+          ctx.fillRect(0, 0, W, H);
+          flashes++;
+          if (flashes >= 6) {
+            clearInterval(flash);
+            draw();
+            overlayTitle.textContent = 'GAME OVER';
+            overlayMsg.textContent = `SCORE: ${String(score).padStart(2,'0')}`;
+            hiEl.textContent = `BEST: ${String(hiScore).padStart(2,'0')}`;
+            overlayBtn.textContent = 'RETRY';
+            overlay.style.display = 'flex';
+          }
+        }, 80);
+      }
+
+      function victory() {
+        running = false;
+        won = true;
+        clearTimeout(tickTimer);
+        overlayTitle.textContent = '🏆 YOU WIN!';
+        overlayMsg.textContent = `PERFECT: ${String(score).padStart(2,'0')}`;
+        hiEl.textContent = `BEST: ${String(hiScore).padStart(2,'0')}`;
+        overlayBtn.textContent = 'PLAY AGAIN';
+        overlay.style.display = 'flex';
+      }
+
+      function resetGame() {
+        clearTimeout(tickTimer);
+        stopAnim();
+        running = false;
+        dead = false;
+        paused = false;
+        won = false;
+        overlayTitle.textContent = 'SNAKE';
+        overlayMsg.textContent = 'Arrow keys or WASD to move';
+        overlayBtn.textContent = 'START';
+        hiEl.textContent = hiScore > 0 ? `BEST: ${String(hiScore).padStart(2,'0')}` : '';
+        overlay.style.display = 'flex';
+        initGame();
+        draw();
+      }
+
+      function pause() {
+        if (!running) return;
+        running = false;
+        paused = true;
+        clearTimeout(tickTimer);
+        drawPause();
+      }
+
+      function unpause() {
+        if (!paused) return;
+        paused = false;
+        running = true;
+        draw();
+        scheduleTick();
+      }
+
+      function startGame() {
+        overlay.style.display = 'none';
+        initGame();
+        draw();
+        running = true;
+        dead = false;
+        paused = false;
+        won = false;
+        clearTimeout(tickTimer);
+        stopAnim();
+        scheduleTick();
+        canvas.focus();
+      }
+
+      overlayBtn.addEventListener('click', startGame);
+
+      const DIRS = {
+        ArrowUp:    { x: 0, y: -1 }, ArrowDown:  { x: 0, y: 1 },
+        ArrowLeft:  { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
+        KeyW: { x: 0, y: -1 }, KeyS: { x: 0, y: 1 },
+        KeyA: { x: -1, y: 0 }, KeyD: { x: 1, y: 0 },
+      };
+
+      // Key repeat tracking — fire immediately, then after 100ms holdDelay, repeat every TICK_MS
+      let keyHeld = null;
+      let holdDelayTimer = null;
+
+      const onKey = (e) => {
+        if (paused) {
+          unpause();
+          e.preventDefault();
+          return;
+        }
+        if (!running) return;
+
+        if (e.code === 'KeyP') { pause(); e.preventDefault(); return; }
+        if (e.code === 'KeyR') { resetGame(); e.preventDefault(); return; }
+
+        const nd = DIRS[e.code];
+        if (!nd) return;
+        if (nd.x === -dir.x && nd.y === -dir.y) { e.preventDefault(); return; }
+
+        e.preventDefault();
+
+        // If same key already held, let the hold repeat handle it
+        if (keyHeld === e.code) return;
+
+        // New key press — apply direction and fire immediately
+        nextDir = nd;
+        keyHeld = e.code;
+        keyHoldStart = Date.now();
+        // Direction change cancels grace period
+        if (nd.x !== dir.x || nd.y !== dir.y) gracePending = false;
+        clearTimeout(tickTimer);
+        clearTimeout(holdDelayTimer);
+        step();
+
+        holdDelayTimer = setTimeout(() => {
+          holdDelayTimer = null;
+        }, 100);
+      };
+
+      const onKeyUp = (e) => {
+        if (e.code === keyHeld) {
+          keyHeld = null;
+          keyHoldStart = null;
+          clearTimeout(holdDelayTimer);
+          holdDelayTimer = null;
+        }
+      };
+
+      canvas.addEventListener('keydown', onKey);
+      canvas.addEventListener('keyup', onKeyUp);
+
+      canvas.addEventListener('blur', () => {
+        if (running) pause();
+        keyHeld = null;
+        clearTimeout(holdDelayTimer);
+      });
+
+      canvas.addEventListener('click', () => {
+        canvas.focus();
+      });
+
+      resize();
+
+      return () => {
+        clearTimeout(tickTimer);
+        clearTimeout(holdDelayTimer);
+        stopAnim();
+        ro.disconnect();
+        canvas.removeEventListener('keydown', onKey);
+        canvas.removeEventListener('keyup', onKeyUp);
+      };
+    }
+rows: 5
+schema: space-widget/v1
+col: -6
+row: -1

@@ -65,6 +65,11 @@ _HERMES_CORE_TOOLS = [
     # zero schema footprint. Gated via check_fn in tools/kanban_tools.py.
     "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
+    # Studio canvas/widget tools. Runtime files live under /opt/data/studio
+    # (or HERMES_HOME/studio in tests) while source stays in the repo.
+    "studio_widget_create", "studio_widget_update", "studio_widget_delete",
+    "studio_widget_list", "studio_widget_read",
+    "studio_install_preset", "studio_list_presets",
 ]
 
 
@@ -225,6 +230,16 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "studio": {
+        "description": "Hermes Studio canvas widgets, live spaces, and reusable presets",
+        "tools": [
+            "studio_widget_create", "studio_widget_update", "studio_widget_delete",
+            "studio_widget_list", "studio_widget_read",
+            "studio_install_preset", "studio_list_presets",
+        ],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
@@ -338,6 +353,10 @@ TOOLSETS = {
             "session_search",
             # Code execution + delegation
             "execute_code", "delegate_task",
+            # Studio canvas/widget tools
+            "studio_widget_create", "studio_widget_update", "studio_widget_delete",
+            "studio_widget_list", "studio_widget_read",
+            "studio_install_preset", "studio_list_presets",
             # Cronjob management
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

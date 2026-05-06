@@ -1,0 +1,311 @@
+cols: 5
+id: top-news
+name: Top News
+renderer: |-
+  async (parent, currentSpace) => {
+    parent.style.cssText = `
+      all: initial;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: white;
+      border-radius: 24px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(95, 185, 255, 0.22), transparent 58%),
+        linear-gradient(180deg, rgba(14, 22, 38, 0.98) 0%, rgba(8, 14, 28, 0.98) 100%);
+      position: relative;
+      user-select: none;
+    `
+
+    const NEWS_PREFS_PATH = "~/news-feed-prefs.json"
+    const DEFAULT_FEEDS = [
+      { label: "BBC News", url: "https://feeds.bbci.co.uk/news/rss.xml" },
+      { label: "Hacker News", url: "https://hnrss.org/frontpage" },
+      { label: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
+      { label: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index" },
+      { label: "NPR News", url: "https://feeds.npr.org/1001/rss.xml" },
+      { label: "Reuters World", url: "https://feeds.reuters.com/reuters/worldNews" },
+      { label: "Wired", url: "https://www.wired.com/feed/rss" },
+      { label: "TechCrunch", url: "https://techcrunch.com/feed/" },
+    ]
+
+    const collapseWhitespace = (value) =>
+      String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+
+    const timeAgo = (dateStr) => {
+      if (!dateStr) return ""
+      const date = new Date(dateStr)
+      if (Number.isNaN(date.getTime())) return ""
+      const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000)
+      if (diffMinutes < 1) return "just now"
+      if (diffMinutes < 60) return diffMinutes + "m ago"
+      if (diffMinutes < 1440) return Math.floor(diffMinutes / 60) + "h ago"
+      return Math.floor(diffMinutes / 1440) + "d ago"
+    }
+
+    const getEntryLink = (entry) => {
+      const links = Array.from(entry.querySelectorAll("link"))
+      for (const linkEl of links) {
+        const href = collapseWhitespace(linkEl.getAttribute("href") || "")
+        if (href) return href
+        const text = collapseWhitespace(linkEl.textContent || "")
+        if (text) return text
+      }
+      return "#"
+    }
+
+    const parseHtmlSummary = (html) => {
+      const doc = new DOMParser().parseFromString(`<body>${html || ""}</body>`, "text/html")
+      const image = doc.querySelector("img")?.getAttribute("src") || ""
+      const text = collapseWhitespace(doc.body.textContent || "")
+      return {
+        image,
+        text,
+      }
+    }
+
+    const summarize = (text, maxLength = 320) => {
+      const normalized = collapseWhitespace(text)
+      if (!normalized) return ""
+      if (normalized.length <= maxLength) return normalized
+      return normalized.slice(0, maxLength - 1).trimEnd() + "…"
+    }
+
+    async function fetchFeed(feedUrl) {
+      const response = await space.fetchExternal(feedUrl, {
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status)
+      }
+
+      const xmlText = await response.text()
+      const doc = new DOMParser().parseFromString(xmlText, "text/xml")
+      const entry = doc.querySelector("item, entry")
+
+      if (!entry) {
+        return null
+      }
+
+      const title = collapseWhitespace(entry.querySelector("title")?.textContent || "Untitled")
+      const link = getEntryLink(entry)
+      const date = collapseWhitespace(
+        entry.querySelector("pubDate, published, updated")?.textContent || ""
+      )
+      const category = collapseWhitespace(
+        entry.querySelector("category")?.textContent ||
+        entry.querySelector("category")?.getAttribute("term") ||
+        ""
+      )
+
+      let image = collapseWhitespace(entry.querySelector("thumbnail")?.getAttribute("url") || "")
+      if (!image) {
+        const mediaContent = entry.querySelector("content")
+        if (mediaContent && String(mediaContent.getAttribute("type") || "").startsWith("image")) {
+          image = collapseWhitespace(mediaContent.getAttribute("url") || "")
+        }
+      }
+      if (!image) {
+        const enclosure = entry.querySelector("enclosure")
+        if (enclosure && String(enclosure.getAttribute("type") || "").startsWith("image")) {
+          image = collapseWhitespace(enclosure.getAttribute("url") || "")
+        }
+      }
+
+      const rawSummary =
+        entry.querySelector("description, summary")?.textContent ||
+        entry.querySelector("content")?.textContent ||
+        ""
+      const parsedSummary = parseHtmlSummary(rawSummary)
+      if (!image) {
+        image = parsedSummary.image
+      }
+
+      return {
+        category,
+        date,
+        image,
+        link,
+        summary: summarize(parsedSummary.text),
+        title,
+      }
+    }
+
+    async function loadPrefs() {
+      try {
+        const raw = await currentSpace.api.fileRead(NEWS_PREFS_PATH, "utf8")
+        const prefs = JSON.parse(raw)
+        if (prefs?.feedUrl) {
+          return {
+            feedLabel: prefs.feedLabel || "News",
+            feedUrl: prefs.feedUrl,
+          }
+        }
+      } catch {}
+
+      return {
+        feedLabel: DEFAULT_FEEDS[0].label,
+        feedUrl: DEFAULT_FEEDS[0].url,
+      }
+    }
+
+    const root = document.createElement("div")
+    root.style.cssText = "display:grid;width:100%;height:100%;padding:14px;box-sizing:border-box;"
+    parent.appendChild(root)
+
+    const card = document.createElement("div")
+    card.style.cssText = "min-height:0;display:grid;grid-template-rows:minmax(132px,1.05fr) auto auto 1fr;gap:10px;"
+    root.appendChild(card)
+
+    const imageEl = document.createElement("button")
+    imageEl.type = "button"
+    imageEl.style.cssText = "border:none;padding:0;border-radius:18px;background:linear-gradient(135deg, rgba(95, 185, 255, .25), rgba(76, 108, 255, .18));overflow:hidden;min-height:0;position:relative;cursor:pointer;"
+    card.appendChild(imageEl)
+
+    const imageTag = document.createElement("img")
+    imageTag.alt = ""
+    imageTag.style.cssText = "width:100%;height:100%;object-fit:cover;display:none;"
+    imageEl.appendChild(imageTag)
+
+    const fallbackLabel = document.createElement("div")
+    fallbackLabel.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:42px;opacity:.9;"
+    fallbackLabel.textContent = "📰"
+    imageEl.appendChild(fallbackLabel)
+
+    const metaEl = document.createElement("div")
+    metaEl.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;font-size:11px;opacity:.65;"
+    card.appendChild(metaEl)
+
+    const headlineEl = document.createElement("button")
+    headlineEl.type = "button"
+    headlineEl.style.cssText = "border:none;padding:0;background:transparent;color:inherit;text-align:left;font-size:19px;font-weight:700;line-height:1.14;letter-spacing:-0.03em;cursor:pointer;"
+    headlineEl.textContent = "Loading top story…"
+    card.appendChild(headlineEl)
+
+    const summaryEl = document.createElement("div")
+    summaryEl.style.cssText = "font-size:13px;line-height:1.5;opacity:.88;overflow:auto;min-height:0;padding-right:4px;"
+    summaryEl.textContent = ""
+    card.appendChild(summaryEl)
+
+    const state = {
+      article: null,
+      error: "",
+      feedLabel: "News",
+      feedUrl: "",
+      loading: false,
+      lastPrefsSignature: "",
+    }
+
+    const openCurrentArticle = () => {
+      if (state.article?.link && state.article.link !== "#") {
+        window.open(state.article.link, "_blank")
+      }
+    }
+
+    const render = () => {
+      const article = state.article
+
+      if (!article) {
+        metaEl.textContent = ""
+        headlineEl.textContent = state.loading ? "Loading top story…" : "Top story unavailable"
+        summaryEl.textContent = state.loading
+          ? "Fetching the latest headline from the current RSS feed."
+          : state.error || "This feed did not return a headline right now."
+        imageTag.style.display = "none"
+        fallbackLabel.style.display = "flex"
+        imageEl.disabled = true
+        headlineEl.disabled = true
+        imageEl.style.cursor = "default"
+        headlineEl.style.cursor = "default"
+        return
+      }
+
+      metaEl.textContent = ""
+      const metaParts = [
+        article.category,
+        article.date ? timeAgo(article.date) : "",
+      ].filter(Boolean)
+      metaParts.forEach((part) => {
+        const chip = document.createElement("span")
+        chip.textContent = part
+        metaEl.appendChild(chip)
+      })
+      headlineEl.textContent = article.title
+      summaryEl.textContent = article.summary || "Open the article to read more from this feed."
+      const isOpenable = Boolean(article.link && article.link !== "#")
+      imageEl.disabled = !isOpenable
+      headlineEl.disabled = !isOpenable
+      imageEl.style.cursor = isOpenable ? "pointer" : "default"
+      headlineEl.style.cursor = isOpenable ? "pointer" : "default"
+
+      if (article.image) {
+        imageTag.src = article.image
+        imageTag.style.display = "block"
+        fallbackLabel.style.display = "none"
+      } else {
+        imageTag.removeAttribute("src")
+        imageTag.style.display = "none"
+        fallbackLabel.style.display = "flex"
+      }
+    }
+
+    async function refresh(force = false) {
+      if (state.loading) {
+        return
+      }
+
+      const prefs = await loadPrefs()
+      const nextSignature = JSON.stringify(prefs)
+      if (!force && nextSignature === state.lastPrefsSignature && state.article) {
+        return
+      }
+
+      state.feedLabel = prefs.feedLabel || "News"
+      state.feedUrl = prefs.feedUrl
+      state.lastPrefsSignature = nextSignature
+      state.loading = true
+      state.error = ""
+      render()
+
+      try {
+        state.article = await fetchFeed(state.feedUrl)
+        state.error = ""
+      } catch (error) {
+        state.article = null
+        state.error = error?.message || "Unable to load this feed right now."
+      } finally {
+        state.loading = false
+        render()
+      }
+    }
+
+    imageEl.onclick = openCurrentArticle
+    headlineEl.onclick = openCurrentArticle
+
+    imageTag.onerror = () => {
+      imageTag.style.display = "none"
+      fallbackLabel.style.display = "flex"
+    }
+
+    const prefsTimer = setInterval(() => {
+      refresh(false)
+    }, 15000)
+
+    await refresh(true)
+
+    return () => {
+      clearInterval(prefsTimer)
+      imageEl.onclick = null
+      headlineEl.onclick = null
+      imageTag.onerror = null
+    }
+  }
+rows: 5
+schema: space-widget/v1
+col: 0
+row: -5

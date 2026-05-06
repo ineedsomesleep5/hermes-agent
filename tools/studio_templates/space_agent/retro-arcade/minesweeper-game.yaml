@@ -1,0 +1,257 @@
+cols: 4
+id: minesweeper-game
+name: Minesweeper
+renderer: |
+  async (parent, spaceRef) => {
+      parent.innerHTML = "";
+      parent.style.cssText = [
+        "display:flex","flex-direction:column","height:100%","width:100%",
+        "overflow:hidden","background:#1a1a2e","color:#e0e0e0",
+        "font-family:sans-serif","box-sizing:border-box","padding:8px","gap:5px"
+      ].join(";");
+  
+      let gridSize = 10;
+      let board = [], revealed = [], flagged = [];
+      let gameOver = false, gameWon = false, firstClick = true;
+      let timerInterval = null, seconds = 0;
+  
+      function calcMines(s) { return Math.max(5, Math.floor(s * s * 0.15)); }
+  
+      // Row 1: slider + info label
+      const row1 = document.createElement("div");
+      row1.style.cssText = "display:flex;align-items:center;gap:8px;flex-shrink:0;";
+  
+      const slider = document.createElement("input");
+      slider.type = "range"; slider.min = "5"; slider.max = "20"; slider.value = "10";
+      slider.style.cssText = "width:120px;flex-shrink:0;accent-color:#7c4dff;cursor:pointer;";
+  
+      const infoLabel = document.createElement("span");
+      infoLabel.style.cssText = "font-size:13px;color:#ccc;white-space:nowrap;font-variant-numeric:tabular-nums;";
+  
+      function updateInfoLabel(minesLeft) {
+        const m = (minesLeft !== undefined) ? minesLeft : calcMines(gridSize);
+        infoLabel.textContent = gridSize + "x" + gridSize + "  \u00B7  " + m + " Mines";
+      }
+      updateInfoLabel();
+  
+      row1.append(slider, infoLabel);
+  
+      // Row 2: reset button + status + timer
+      const row2 = document.createElement("div");
+      row2.style.cssText = "display:flex;align-items:center;gap:8px;flex-shrink:0;";
+  
+      const resetBtn = document.createElement("button");
+      resetBtn.textContent = "Reset";
+      resetBtn.style.cssText = "padding:4px 14px;background:#7c4dff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:bold;flex-shrink:0;";
+  
+      const statusBar = document.createElement("div");
+      statusBar.style.cssText = "flex:1;text-align:center;font-size:13px;font-weight:bold;";
+  
+      const timerEl = document.createElement("span");
+      timerEl.style.cssText = "font-size:13px;color:#69f0ae;white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums;min-width:36px;text-align:right;";
+      timerEl.textContent = "0s";
+  
+      row2.append(resetBtn, statusBar, timerEl);
+  
+      // Grid
+      const gridWrapper = document.createElement("div");
+      gridWrapper.style.cssText = "flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;";
+  
+      const gridEl = document.createElement("div");
+      gridEl.style.cssText = "display:grid;gap:2px;";
+      gridWrapper.appendChild(gridEl);
+  
+      parent.append(row1, row2, gridWrapper);
+  
+      function stopTimer() {
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      }
+      function startTimer() {
+        stopTimer(); seconds = 0; timerEl.textContent = "0s";
+        timerInterval = setInterval(function() { seconds++; timerEl.textContent = seconds + "s"; }, 1000);
+      }
+  
+      function initGame() {
+        stopTimer(); seconds = 0; timerEl.textContent = "0s";
+        gameOver = false; gameWon = false; firstClick = true;
+        board = []; revealed = []; flagged = [];
+        for (let i = 0; i < gridSize; i++) {
+          board.push(new Array(gridSize).fill(0));
+          revealed.push(new Array(gridSize).fill(false));
+          flagged.push(new Array(gridSize).fill(false));
+        }
+        statusBar.textContent = "Click a cell to start!";
+        statusBar.style.color = "#aaa";
+        updateInfoLabel();
+        renderGrid();
+      }
+  
+      function placeMines(safeR, safeC) {
+        const total = calcMines(gridSize);
+        let placed = 0;
+        while (placed < total) {
+          const r = Math.floor(Math.random() * gridSize);
+          const c = Math.floor(Math.random() * gridSize);
+          if (board[r][c] === -1) continue;
+          if (Math.abs(r - safeR) <= 1 && Math.abs(c - safeC) <= 1) continue;
+          board[r][c] = -1; placed++;
+        }
+        for (let r = 0; r < gridSize; r++) {
+          for (let c = 0; c < gridSize; c++) {
+            if (board[r][c] === -1) continue;
+            let n = 0;
+            for (let dr = -1; dr <= 1; dr++)
+              for (let dc = -1; dc <= 1; dc++) {
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < gridSize && nc >= 0 && nc < gridSize && board[nr][nc] === -1) n++;
+              }
+            board[r][c] = n;
+          }
+        }
+      }
+  
+      function checkWin() {
+        for (let r = 0; r < gridSize; r++)
+          for (let c = 0; c < gridSize; c++)
+            if (!revealed[r][c] && board[r][c] !== -1) return false;
+        return true;
+      }
+  
+      function revealCell(r, c) {
+        if (r < 0 || r >= gridSize || c < 0 || c >= gridSize) return;
+        if (revealed[r][c] || flagged[r][c]) return;
+        revealed[r][c] = true;
+        if (board[r][c] === 0)
+          for (let dr = -1; dr <= 1; dr++)
+            for (let dc = -1; dc <= 1; dc++)
+              revealCell(r + dr, c + dc);
+      }
+  
+      function revealAll() {
+        for (let r = 0; r < gridSize; r++)
+          for (let c = 0; c < gridSize; c++)
+            revealed[r][c] = true;
+      }
+  
+      function makeIcon(name, color, size) {
+        const s = document.createElement("span");
+        s.className = "material-symbols-outlined";
+        s.style.cssText = "font-size:" + size + "px;color:" + color + ";line-height:1;pointer-events:none;";
+        s.textContent = name;
+        return s;
+      }
+  
+      const numColors = ["", "#5c9eff", "#69f0ae", "#ff6b6b", "#ce93d8", "#ffab91", "#80deea", "#cfd8dc", "#90a4ae"];
+  
+      function renderGrid() {
+        const wrapW = gridWrapper.clientWidth || 300;
+        const wrapH = gridWrapper.clientHeight || 300;
+        const maxW = Math.floor((wrapW - (gridSize - 1) * 2) / gridSize);
+        const maxH = Math.floor((wrapH - (gridSize - 1) * 2) / gridSize);
+        const cs = Math.max(12, Math.min(maxW, maxH, 44));
+        const iconSz = Math.max(10, Math.floor(cs * 0.62));
+        const fs = Math.max(8, Math.floor(cs * 0.48));
+  
+        gridEl.style.gridTemplateColumns = "repeat(" + gridSize + ", " + cs + "px)";
+        gridEl.style.gridTemplateRows = "repeat(" + gridSize + ", " + cs + "px)";
+        gridEl.innerHTML = "";
+  
+        let f = 0;
+        for (let r = 0; r < gridSize; r++)
+          for (let c = 0; c < gridSize; c++)
+            if (flagged[r][c]) f++;
+        updateInfoLabel(calcMines(gridSize) - f);
+  
+        for (let r = 0; r < gridSize; r++) {
+          for (let c = 0; c < gridSize; c++) {
+            const cell = document.createElement("div");
+            cell.style.cssText = [
+              "width:" + cs + "px", "height:" + cs + "px",
+              "display:flex", "align-items:center", "justify-content:center",
+              "border-radius:3px", "cursor:pointer",
+              "font-size:" + fs + "px", "font-weight:bold",
+              "user-select:none", "box-sizing:border-box"
+            ].join(";");
+  
+            if (revealed[r][c]) {
+              if (board[r][c] === -1) {
+                cell.style.background = "#7f1d1d";
+                cell.style.border = "1px solid #ef4444";
+                cell.appendChild(makeIcon("bomb", "#fca5a5", iconSz));
+              } else {
+                cell.style.background = "#1e1e3a";
+                cell.style.border = "1px solid #2a2a4a";
+                if (board[r][c] > 0) {
+                  cell.textContent = String(board[r][c]);
+                  cell.style.color = numColors[board[r][c]] || "#fff";
+                }
+              }
+            } else if (flagged[r][c]) {
+              cell.style.background = "#2d1f4e";
+              cell.style.border = "1px solid #7c4dff";
+              cell.appendChild(makeIcon("flag", "#f87171", iconSz));
+            } else {
+              cell.style.background = "#2d2d4e";
+              cell.style.border = "1px solid #3d3d5e";
+              cell.addEventListener("mouseenter", function() {
+                if (!gameOver && !gameWon) cell.style.background = "#3d3d6e";
+              });
+              cell.addEventListener("mouseleave", function() {
+                if (!gameOver && !gameWon) cell.style.background = "#2d2d4e";
+              });
+            }
+  
+            if (!gameOver && !gameWon) {
+              (function(row, col) {
+                cell.addEventListener("click", function() { handleClick(row, col); });
+                cell.addEventListener("contextmenu", function(e) { e.preventDefault(); handleFlag(row, col); });
+              })(r, c);
+            }
+  
+            gridEl.appendChild(cell);
+          }
+        }
+      }
+  
+      function handleClick(r, c) {
+        if (gameOver || gameWon || revealed[r][c] || flagged[r][c]) return;
+        if (firstClick) { firstClick = false; placeMines(r, c); startTimer(); }
+        if (board[r][c] === -1) {
+          revealed[r][c] = true; revealAll(); gameOver = true; stopTimer();
+          statusBar.textContent = "BOOM! Game Over!"; statusBar.style.color = "#ff6b6b";
+          renderGrid(); return;
+        }
+        revealCell(r, c);
+        if (checkWin()) {
+          gameWon = true; stopTimer();
+          statusBar.textContent = "You Win in " + seconds + "s!"; statusBar.style.color = "#69f0ae";
+          for (let rr = 0; rr < gridSize; rr++)
+            for (let cc = 0; cc < gridSize; cc++)
+              if (board[rr][cc] === -1) flagged[rr][cc] = true;
+        }
+        renderGrid();
+      }
+  
+      function handleFlag(r, c) {
+        if (gameOver || gameWon || revealed[r][c]) return;
+        flagged[r][c] = !flagged[r][c]; renderGrid();
+      }
+  
+      slider.addEventListener("input", function() {
+        gridSize = parseInt(slider.value);
+        updateInfoLabel();
+        initGame();
+      });
+  
+      resetBtn.addEventListener("click", function() { initGame(); });
+  
+      const ro = new ResizeObserver(function() { renderGrid(); });
+      ro.observe(gridWrapper);
+  
+      initGame();
+      return function() { stopTimer(); ro.disconnect(); };
+    }
+rows: 5
+schema: space-widget/v1
+col: 3
+row: -1
