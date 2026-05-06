@@ -608,6 +608,7 @@ _ACTION_LOG_DIR: Path = get_hermes_home() / "logs"
 _ACTION_LOG_FILES: Dict[str, str] = {
     "gateway-restart": "gateway-restart.log",
     "hermes-update": "hermes-update.log",
+    "hermes-safe-update": "hermes-safe-update.log",
 }
 
 # ``name`` → most recently spawned Popen handle.  Used so ``status`` can
@@ -681,18 +682,201 @@ async def restart_gateway():
 
 
 @app.post("/api/hermes/update")
-async def update_hermes():
-    """Kick off ``hermes update`` in the background."""
+async def update_hermes(legacy: bool = False):
+    """Kick off the safe-update wrapper by default; ?legacy=1 falls back to bare ``hermes update``.
+
+    The dashboard "Update Hermes" button hits this endpoint. We route it
+    through /opt/data/scripts/safe-update.sh so local changes are committed
+    + pushed to the user's GitHub fork before pulling upstream, and merge
+    conflicts halt cleanly with a structured report at /api/hermes/safe-update/result.
+    """
+    if legacy:
+        try:
+            proc = _spawn_hermes_action(["update"], "hermes-update")
+        except Exception as exc:
+            _log.exception("Failed to spawn hermes update")
+            raise HTTPException(status_code=500, detail=f"Failed to start update: {exc}")
+        return {"ok": True, "pid": proc.pid, "name": "hermes-update", "mode": "legacy"}
+
+    if not Path(_SAFE_UPDATE_SCRIPT).is_file():
+        raise HTTPException(status_code=500, detail=f"safe-update script missing at {_SAFE_UPDATE_SCRIPT}")
+
+    name = "hermes-safe-update"
+    log_file_name = _ACTION_LOG_FILES[name]
+    _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _ACTION_LOG_DIR / log_file_name
+    log_file = open(log_path, "ab", buffering=0)
+    log_file.write(
+        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+    )
+
     try:
-        proc = _spawn_hermes_action(["update"], "hermes-update")
+        proc = subprocess.Popen(
+            ["sudo", "-n", _SAFE_UPDATE_SCRIPT],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     except Exception as exc:
-        _log.exception("Failed to spawn hermes update")
-        raise HTTPException(status_code=500, detail=f"Failed to start update: {exc}")
-    return {
-        "ok": True,
-        "pid": proc.pid,
-        "name": "hermes-update",
-    }
+        _log.exception("Failed to spawn safe-update")
+        raise HTTPException(status_code=500, detail=f"Failed to start safe-update: {exc}")
+
+    _ACTION_PROCS[name] = proc
+    # Symlink hermes-update.log -> hermes-safe-update.log so the existing
+    # frontend status poller (calling /api/actions/hermes-update/status) keeps working.
+    legacy_log = _ACTION_LOG_DIR / _ACTION_LOG_FILES["hermes-update"]
+    try:
+        if legacy_log.exists() or legacy_log.is_symlink():
+            legacy_log.unlink()
+        legacy_log.symlink_to(log_path)
+    except Exception:
+        pass
+    _ACTION_PROCS["hermes-update"] = proc
+
+    return {"ok": True, "pid": proc.pid, "name": "hermes-update", "mode": "safe"}
+
+
+# Safe update — durable, conflict-aware wrapper around `hermes update`.
+# Pipeline lives in /opt/data/scripts/safe-update.sh.
+
+_SAFE_UPDATE_SCRIPT = "/opt/data/scripts/safe-update.sh"
+_SAFE_UPDATE_RESULT_FILE = Path("/opt/data/logs/safe-update-result.json")
+
+
+@app.post("/api/hermes/safe-update")
+async def safe_update_hermes():
+    """Kick off the safe-update wrapper script in the background."""
+    if not Path(_SAFE_UPDATE_SCRIPT).is_file():
+        raise HTTPException(status_code=500, detail=f"safe-update script missing at {_SAFE_UPDATE_SCRIPT}")
+
+    name = "hermes-safe-update"
+    log_file_name = _ACTION_LOG_FILES[name]
+    _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _ACTION_LOG_DIR / log_file_name
+    log_file = open(log_path, "ab", buffering=0)
+    log_file.write(
+        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+    )
+
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "-n", _SAFE_UPDATE_SCRIPT],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        _log.exception("Failed to spawn safe-update")
+        raise HTTPException(status_code=500, detail=f"Failed to start safe-update: {exc}")
+
+    _ACTION_PROCS[name] = proc
+    return {"ok": True, "pid": proc.pid, "name": name}
+
+
+@app.get("/api/hermes/safe-update/check")
+async def safe_update_check():
+    """Read-only: report how many upstream commits are pending."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            cwd=str(PROJECT_ROOT),
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        ahead = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            cwd=str(PROJECT_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(PROJECT_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(PROJECT_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip())
+        return {
+            "ok": True,
+            "commits_behind": int(ahead) if ahead.isdigit() else 0,
+            "head": head,
+            "dirty": dirty,
+        }
+    except subprocess.CalledProcessError as exc:
+        return {
+            "ok": False,
+            "error": exc.stderr.decode(errors="replace") if exc.stderr else str(exc),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/api/hermes/safe-update/result")
+async def safe_update_result():
+    """Return the latest safe-update result JSON, or a not-found marker."""
+    if not _SAFE_UPDATE_RESULT_FILE.is_file():
+        return {"ok": False, "error": "no safe-update has been run yet"}
+    try:
+        return json.loads(_SAFE_UPDATE_RESULT_FILE.read_text())
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to parse result file: {exc}"}
+
+
+class _SafeUpdateRollbackBody(BaseModel):
+    confirm: bool = False
+
+
+@app.post("/api/hermes/safe-update/rollback")
+async def safe_update_rollback(body: _SafeUpdateRollbackBody):
+    """Reset HEAD to the pre-update commit recorded in the latest result."""
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="rollback requires confirm=true")
+    if not _SAFE_UPDATE_RESULT_FILE.is_file():
+        raise HTTPException(status_code=404, detail="no safe-update result to roll back from")
+    try:
+        result = json.loads(_SAFE_UPDATE_RESULT_FILE.read_text())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"cannot parse result file: {exc}")
+
+    target = result.get("rollback_to")
+    if not target:
+        raise HTTPException(status_code=400, detail="no rollback_to sha in result file")
+
+    try:
+        subprocess.run(
+            ["sudo", "-n", "-u", "hermes", "git", "-C", str(PROJECT_ROOT), "reset", "--hard", target],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"git reset failed: {exc.stderr or exc.stdout or str(exc)}",
+        )
+
+    for unit in ("hermes-dashboard", "hermes-workspace"):
+        try:
+            subprocess.run(["sudo", "-n", "systemctl", "restart", unit],
+                          check=False, capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+    return {"ok": True, "rolled_back_to": target}
 
 
 @app.get("/api/actions/{name}/status")
