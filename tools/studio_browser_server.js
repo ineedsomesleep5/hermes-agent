@@ -118,7 +118,10 @@ function normalizeUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return SEARCH_HOME;
   if (/^https?:\/\//i.test(raw)) return raw;
-  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$|\?|#)/i.test(raw) || /^localhost(:\d+)?(\/|$)/i.test(raw)) {
+  if (/^localhost(:\d+)?(\/|$|\?|#)/i.test(raw) || /^127\.0\.0\.1(:\d+)?(\/|$|\?|#)/.test(raw)) {
+    return `http://${raw}`;
+  }
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$|\?|#)/i.test(raw)) {
     return `https://${raw}`;
   }
   return `${SEARCH_URL}${encodeURIComponent(raw)}`;
@@ -204,7 +207,7 @@ async function ensureCdp() {
 
   // Override the HeadlessChrome UA — Google etc. CAPTCHA on it instantly.
   const STEALTH_UA = process.env.AGENT_BROWSER_USER_AGENT ||
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.137 Safari/537.36';
   try {
     await cdpSend('Network.setUserAgentOverride', {
       userAgent: STEALTH_UA,
@@ -222,8 +225,8 @@ async function ensureCdp() {
         model: '',
         mobile: false,
         brands: [
-          { brand: 'Chromium', version: '146' },
-          { brand: 'Google Chrome', version: '146' },
+          { brand: 'Chromium', version: '147' },
+          { brand: 'Google Chrome', version: '147' },
           { brand: 'Not?A_Brand', version: '24' },
         ],
       },
