@@ -772,7 +772,7 @@ _SAFE_UPDATE_RESULT_FILE = Path("/opt/data/logs/safe-update-result.json")
 
 
 @app.post("/api/hermes/safe-update")
-async def safe_update_hermes():
+async def safe_update_hermes(dry: bool = False):
     """Kick off the safe-update wrapper script in the background."""
     if not Path(_SAFE_UPDATE_SCRIPT).is_file():
         raise HTTPException(status_code=500, detail=f"safe-update script missing at {_SAFE_UPDATE_SCRIPT}")
@@ -783,12 +783,15 @@ async def safe_update_hermes():
     log_path = _ACTION_LOG_DIR / log_file_name
     log_file = open(log_path, "ab", buffering=0)
     log_file.write(
-        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')}{' (dry-run)' if dry else ''} ===\n".encode()
     )
+    cmd = ["sudo", "-n", _SAFE_UPDATE_SCRIPT]
+    if dry:
+        cmd.append("--dry-run")
 
     try:
         proc = subprocess.Popen(
-            ["sudo", "-n", _SAFE_UPDATE_SCRIPT],
+            cmd,
             cwd=str(PROJECT_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=log_file,
@@ -800,7 +803,7 @@ async def safe_update_hermes():
         raise HTTPException(status_code=500, detail=f"Failed to start safe-update: {exc}")
 
     _ACTION_PROCS[name] = proc
-    return {"ok": True, "pid": proc.pid, "name": name}
+    return {"ok": True, "pid": proc.pid, "name": name, "mode": "dry-run" if dry else "safe"}
 
 
 @app.get("/api/hermes/safe-update/check")
@@ -1184,6 +1187,152 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
             pass  # can't read disk config — just use the string form
     return config
 
+
+
+
+# ---------------------------------------------------------------------------
+# Model picker — list available providers/models + runtime switch
+# ---------------------------------------------------------------------------
+
+@app.get("/api/model/options")
+def get_model_options():
+    """Return curated list of providers + models for ModelPickerDialog.
+
+    Response matches ModelOptionsResponse schema in web/src/lib/api.ts:
+        { model, provider, providers: [...] }
+    Wraps list_picker_providers() — same data Telegram /model picker uses.
+    """
+    try:
+        from hermes_cli.model_switch import list_picker_providers
+        cfg = load_config()
+        model_cfg = cfg.get("model", "")
+        current_provider = ""
+        current_model = ""
+        current_base_url = ""
+        if isinstance(model_cfg, dict):
+            current_model = model_cfg.get("default", model_cfg.get("name", ""))
+            current_provider = model_cfg.get("provider", "")
+            current_base_url = model_cfg.get("base_url", "")
+        else:
+            current_model = str(model_cfg) if model_cfg else ""
+
+        user_providers = cfg.get("providers", {}) or {}
+        custom_providers = cfg.get("custom_providers", []) or []
+
+        providers = list_picker_providers(
+            current_provider=current_provider,
+            current_base_url=current_base_url,
+            user_providers=user_providers,
+            custom_providers=custom_providers,
+            max_models=20,
+            current_model=current_model,
+        )
+        return {
+            "model": current_model,
+            "provider": current_provider,
+            "providers": providers,
+        }
+    except Exception as exc:
+        _log.exception("list models failed")
+        return {"providers": [], "error": str(exc)}
+
+
+class _ModelSwitchBody(BaseModel):
+    model: str
+    provider: Optional[str] = ""
+    scope: Optional[str] = "main"  # main | auxiliary (auxiliary not yet implemented)
+    task: Optional[str] = ""
+    persist: bool = True
+
+
+@app.post("/api/model/set")
+def set_model_endpoint(body: _ModelSwitchBody):
+    """Validate + apply a model switch.
+
+    Steps:
+      1. Run model_switch.switch_model() to resolve the model + provider +
+         credentials (without actually changing anything yet).
+      2. If persist=true, write to config.yaml and restart hermes-agent so
+         the change takes effect on next turn across all surfaces (Studio,
+         Telegram, CLI, etc.).
+      3. Return the resolved metadata so the UI can confirm.
+    """
+    try:
+        from hermes_cli.model_switch import switch_model as _ms_switch
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"model_switch not importable: {exc}")
+
+    cfg = load_config()
+    model_cfg = cfg.get("model", "")
+    if isinstance(model_cfg, dict):
+        cur_model = model_cfg.get("default", model_cfg.get("name", ""))
+        cur_provider = model_cfg.get("provider", "")
+        cur_base_url = model_cfg.get("base_url", "")
+        cur_api_key = model_cfg.get("api_key", "")
+    else:
+        cur_model = str(model_cfg) if model_cfg else ""
+        cur_provider = ""
+        cur_base_url = ""
+        cur_api_key = ""
+
+    user_providers = cfg.get("providers", {}) or {}
+    custom_providers = cfg.get("custom_providers", []) or []
+
+    result = _ms_switch(
+        raw_input=body.model,
+        current_provider=cur_provider,
+        current_model=cur_model,
+        current_base_url=cur_base_url,
+        current_api_key=cur_api_key,
+        is_global=bool(body.persist),
+        explicit_provider=body.provider or "",
+        user_providers=user_providers,
+        custom_providers=custom_providers,
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error_message or "model switch failed")
+
+    if body.persist:
+        # Write back to config.yaml. Preserve dict shape if it was a dict,
+        # else upgrade scalar to dict.
+        try:
+            new_model_cfg = {
+                "default": result.new_model,
+                "provider": result.target_provider,
+            }
+            if result.base_url:
+                new_model_cfg["base_url"] = result.base_url
+            cfg["model"] = new_model_cfg
+            from hermes_cli.config import save_config
+            save_config(cfg)
+        except Exception as exc:
+            _log.exception("persist model switch failed")
+            raise HTTPException(status_code=500, detail=f"persist failed: {exc}")
+
+        # Restart hermes-agent (gateway) so the new model takes effect.
+        # Use a detached restart so this dashboard process doesn't get
+        # killed mid-response (same trick safe-update.sh uses).
+        try:
+            import subprocess as _sp
+            _sp.Popen(
+                ["sudo", "-n", "systemd-run", "--unit", f"hermes-agent-restart-{os.getpid()}",
+                 "--description", "deferred agent restart from model switch",
+                 "/bin/bash", "-c", "sleep 1 && systemctl restart hermes-agent"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, stdin=_sp.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            _log.warning("agent restart scheduling failed: %s", exc)
+
+    return {
+        "ok": True,
+        "scope": body.scope or "main",
+        "model": result.new_model,
+        "provider": result.target_provider,
+        "tasks": [],
+        "reset": False,
+    }
 
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate):
@@ -2445,6 +2594,10 @@ class StudioBrowserPoint(BaseModel):
     displayHeight: float
     deltaX: Optional[float] = 0
     deltaY: Optional[float] = 0
+    coordinateSpace: Optional[str] = None
+    targetSpace: Optional[str] = None
+    button: Optional[str] = None
+    clickCount: Optional[int] = 1
 
 
 class StudioBrowserType(BaseModel):
@@ -2455,12 +2608,21 @@ class StudioBrowserKey(BaseModel):
     key: str
 
 
+class StudioBrowserCookieImport(BaseModel):
+    cookies: List[Dict[str, Any]]
+    verifyUrl: Optional[str] = None
+
+
 class StudioBrowserTabIndex(BaseModel):
     index: int = 0
 
 
 class StudioBrowserRecordPath(BaseModel):
     path: Optional[str] = None
+
+
+class StudioBrowserTabNew(BaseModel):
+    url: Optional[str] = None
 
 
 _STUDIO_BROWSER_PORT = int(os.environ.get("STUDIO_BROWSER_PORT", "9322"))
@@ -2951,6 +3113,14 @@ async def studio_browser_state():
     return await asyncio.to_thread(_studio_browser_request, "/state")
 
 
+@app.get("/api/studio/browser/snapshot")
+async def studio_browser_snapshot(interactive: bool = False, compact: bool = True):
+    params = urllib.parse.urlencode(
+        {"interactive": int(interactive), "compact": int(compact)}
+    )
+    return await asyncio.to_thread(_studio_browser_request, f"/snapshot?{params}")
+
+
 @app.post("/api/studio/browser/navigate")
 async def studio_browser_navigate(body: StudioBrowserNavigate):
     return await asyncio.to_thread(_studio_browser_request, "/navigate", {"url": body.url})
@@ -2991,9 +3161,98 @@ async def studio_browser_key(body: StudioBrowserKey):
     return await asyncio.to_thread(_studio_browser_request, "/key", {"key": body.key})
 
 
+@app.post("/api/studio/browser/cookies/import")
+async def studio_browser_cookies_import(body: StudioBrowserCookieImport):
+    payload = body.model_dump(exclude_none=True)
+    return await asyncio.to_thread(_studio_browser_request, "/cookies/import", payload)
+
+
+@app.get("/api/studio/browser/cookies/list")
+async def studio_browser_cookies_list(domain: str = ""):
+    path = "/cookies/list"
+    if domain:
+        path += "?" + urllib.parse.urlencode({"domain": domain})
+    return await asyncio.to_thread(_studio_browser_request, path)
+
+
+@app.websocket("/api/studio/browser/stream")
+async def studio_browser_stream(ws: WebSocket) -> None:
+    """Bidirectional proxy between the dashboard SPA and the studio browser
+    server's CDP-screencast WebSocket. Browser sends input events as JSON;
+    server pushes JPEG frames as binary buffers."""
+    # Auth via ?token=<session> query param (browsers can't set custom headers on WebSocket)
+    token = ws.query_params.get("token", "")
+    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        await ws.close(code=4401)
+        return
+
+    client_host = ws.client.host if ws.client else ""
+    if client_host and client_host not in _LOOPBACK_HOSTS:
+        await ws.close(code=4403)
+        return
+
+    await ws.accept()
+
+    # Connect upstream to studio_browser_server
+    import websockets as _ws_client
+    upstream_url = f"ws://127.0.0.1:{_STUDIO_BROWSER_PORT}/ws/stream"
+    try:
+        # ensure the studio browser is running before connecting
+        _ensure_studio_browser()
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "error": f"studio browser unavailable: {exc}"})
+        except Exception:
+            pass
+        await ws.close(code=1011)
+        return
+
+    try:
+        upstream = await _ws_client.connect(upstream_url, max_size=8 * 1024 * 1024)
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "error": f"upstream connect failed: {exc}"})
+        except Exception:
+            pass
+        await ws.close(code=1011)
+        return
+
+    async def client_to_upstream():
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                if "text" in msg and msg["text"] is not None:
+                    await upstream.send(msg["text"])
+                elif "bytes" in msg and msg["bytes"] is not None:
+                    await upstream.send(msg["bytes"])
+        except Exception:
+            pass
+
+    async def upstream_to_client():
+        try:
+            async for frame in upstream:
+                if isinstance(frame, (bytes, bytearray)):
+                    await ws.send_bytes(bytes(frame))
+                else:
+                    await ws.send_text(str(frame))
+        except Exception:
+            pass
+
+    try:
+        await asyncio.gather(client_to_upstream(), upstream_to_client())
+    finally:
+        try: await upstream.close()
+        except Exception: pass
+        try: await ws.close()
+        except Exception: pass
+
+
 @app.post("/api/studio/browser/tab/new")
-async def studio_browser_tab_new():
-    return await asyncio.to_thread(_studio_browser_request, "/tab/new", {})
+async def studio_browser_tab_new(body: Optional[StudioBrowserTabNew] = None):
+    payload = body.model_dump(exclude_none=True) if body else {}
+    return await asyncio.to_thread(_studio_browser_request, "/tab/new", payload)
 
 
 @app.post("/api/studio/browser/tab/select")

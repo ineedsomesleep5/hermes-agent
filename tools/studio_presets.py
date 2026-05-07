@@ -994,9 +994,12 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "renderer": _get_embedded_browser_renderer(),
         "size": {"w": 8, "h": 8},
         "description": (
-            "Lightweight Space Agent-style embedded browser with URL bar, "
-            "tabs, back/forward/reload, screenshot view, and recording. "
-            "Uses the Hermes browser backend API instead of heavy Xpra/Chrome."
+            "Embedded browser with two modes: iframe (fast, for normal sites) "
+            "and snapshot (real-time WebSocket-streamed headless Chrome with "
+            "stealth + low-latency input — for X, Meta, LinkedIn, and other "
+            "sites that block iframes). Auto-switches to snapshot for known-"
+            "blocked hosts. Click the snapshot to enter typing mode (blue "
+            "border), Esc to release."
         ),
     },
     "skills_grid": {

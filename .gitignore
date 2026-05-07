@@ -75,3 +75,7 @@ models-dev-upstream/
 *.bak
 *.bak.*
 
+
+# VPS-local agent context (survives upstream merges)
+HERMES.md
+.hermes.md

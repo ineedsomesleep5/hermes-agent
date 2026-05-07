@@ -66,7 +66,7 @@ def studio_install_embedded_browser(args: Dict[str, Any], **_) -> str:
                 "title": rec["title"],
                 "position": rec["position"],
                 "size": rec["size"],
-                "description": "Space Agent-style embedded browser widget with tabs, URL bar, and recording.",
+                "description": "Embedded browser with iframe + snapshot modes; snapshot streams headless Chrome over WebSocket with stealth (works on X, Meta, LinkedIn).",
             }
         )
     except ValueError as exc:

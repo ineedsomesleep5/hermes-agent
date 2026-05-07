@@ -1,81 +1,484 @@
+// studio_browser_server.js
+//
+// Thin shim around `agent-browser` (Vercel Labs CLI). Replaces our
+// previous Playwright + stealth stack. agent-browser owns Chrome
+// lifecycle + stealth + profile management; we just bridge:
+//
+//   [browser tab]  <-WS->  this server (port 9322)
+//                              |
+//                              +--> agent-browser stream WS (frames, read-only)
+//                              |
+//                              +--> agent-browser CDP URL (input dispatch + navigation)
+//                              |
+//                              +--> agent-browser CLI (snapshot, get url/title, etc.)
+//
+// HTTP endpoints kept compatible with the dashboard's existing
+// /api/studio/browser/* routes so nothing else has to change.
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { spawn, execFileSync } = require('child_process');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const PORT = Number(process.env.STUDIO_BROWSER_PORT || 9322);
-const PROFILE = process.env.STUDIO_BROWSER_PROFILE || '/opt/data/profiles/supervisor/home/.studio-browser-profile';
-const SEARCH_HOME = process.env.STUDIO_BROWSER_SEARCH_HOME || 'https://duckduckgo.com/';
-const SEARCH_URL = process.env.STUDIO_BROWSER_SEARCH_URL || 'https://duckduckgo.com/?q=';
+const AB_BIN = process.env.AGENT_BROWSER_BIN || '/usr/bin/agent-browser';
+const SEARCH_HOME = process.env.STUDIO_BROWSER_SEARCH_HOME || 'https://example.com/';
+const SEARCH_URL  = process.env.STUDIO_BROWSER_SEARCH_URL  || 'https://www.google.com/search?q=';
 const VIEWPORT = { width: 1280, height: 820 };
-const CANDIDATES = [
-  process.env.STUDIO_BROWSER_CHROME,
-  '/opt/data/profiles/supervisor/home/.cache/puppeteer/chrome/linux-146.0.7680.153/chrome-linux64/chrome',
-  '/opt/data/profiles/supervisor/home/.cache/puppeteer/chrome-headless-shell/linux-146.0.7680.153/chrome-headless-shell-linux64/chrome-headless-shell',
-  '/opt/data/profiles/supervisor/home/.cache/hyperframes/chrome/chrome-headless-shell/linux-131.0.6778.85/chrome-headless-shell-linux64/chrome-headless-shell',
-].filter(Boolean);
+const STREAM_QUALITY_ACTIVE = Number(process.env.STUDIO_BROWSER_STREAM_QUALITY_ACTIVE || 55);
+const STREAM_QUALITY_IDLE = Number(process.env.STUDIO_BROWSER_STREAM_QUALITY_IDLE || 35);
+const RECORDING_DIR = process.env.STUDIO_BROWSER_RECORDING_DIR || '/opt/data/studio/browser-recordings';
 
-let context;
-let page;
-let launching;
+// ------------------------------------------------------------------
+// agent-browser CLI helpers
+// ------------------------------------------------------------------
 
-function chromePath() {
-  for (const p of CANDIDATES) {
+function abJSON(args) {
+  // Run `agent-browser ...args --json` synchronously, return parsed obj or null
+  try {
+    const out = execFileSync(AB_BIN, [...args, '--json'], { timeout: 15000, encoding: 'utf8' });
+    return JSON.parse(out);
+  } catch (err) {
+    return null;
+  }
+}
+
+function abRun(args) {
+  // Run async, fire-and-forget (used for click/type/press where we don't need stdout)
+  return new Promise((resolve, reject) => {
+    const child = spawn(AB_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`agent-browser exit ${code}: ${stderr || stdout}`));
+    });
+    setTimeout(() => { try { child.kill(); } catch (_) {} reject(new Error('timeout')); }, 30000);
+  });
+}
+
+function getStreamPort() {
+  const r = abJSON(['stream', 'status']);
+  return r && r.success && r.data && r.data.port ? r.data.port : null;
+}
+
+function getCdpUrl() {
+  try {
+    return execFileSync(AB_BIN, ['get', 'cdp-url'], { timeout: 5000, encoding: 'utf8' }).trim();
+  } catch (_) { return null; }
+}
+
+function getCurrentUrl() {
+  try {
+    return execFileSync(AB_BIN, ['get', 'url'], { timeout: 5000, encoding: 'utf8' }).trim();
+  } catch (_) { return ''; }
+}
+
+function getCurrentTitle() {
+  try {
+    return execFileSync(AB_BIN, ['get', 'title'], { timeout: 5000, encoding: 'utf8' }).trim();
+  } catch (_) { return ''; }
+}
+
+function getTabs() {
+  const r = abJSON(['tab', 'list']);
+  if (!r || !r.success || !r.data || !Array.isArray(r.data.tabs)) return [];
+  return r.data.tabs.map((tab, index) => ({
+    index,
+    active: !!tab.active,
+    tabId: tab.tabId || `t${index + 1}`,
+    title: tab.title || '',
+    url: tab.url || '',
+    type: tab.type || 'page',
+  }));
+}
+
+function tabRefFromIndex(index) {
+  currentTabs = getTabs();
+  const numeric = Number(index || 0);
+  const tab = currentTabs[Math.max(0, numeric)];
+  return tab && tab.tabId ? tab.tabId : `t${numeric + 1}`;
+}
+
+function ensureBrowser() {
+  // Make sure a daemon + page is running. `agent-browser open` is idempotent —
+  // if a session is already on a URL, it just updates it; if not, it spins up.
+  const url = getCurrentUrl();
+  if (!url || url === 'about:blank' || url === '') {
     try {
-      if (fs.existsSync(p)) return p;
+      execFileSync(AB_BIN, ['open', SEARCH_HOME], { timeout: 30000, stdio: 'ignore' });
     } catch (_) {}
   }
-  return undefined;
 }
 
 function normalizeUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return SEARCH_HOME;
   if (/^https?:\/\//i.test(raw)) return raw;
-  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$|\?|#)/i.test(raw) || /^localhost(:\d+)?(\/|$)/i.test(raw)) return `https://${raw}`;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$|\?|#)/i.test(raw) || /^localhost(:\d+)?(\/|$)/i.test(raw)) {
+    return `https://${raw}`;
+  }
   return `${SEARCH_URL}${encodeURIComponent(raw)}`;
 }
 
-async function ensurePage() {
-  if (page && !page.isClosed()) return page;
-  if (launching) return launching;
-  launching = (async () => {
-    fs.mkdirSync(PROFILE, { recursive: true });
-    context = await chromium.launchPersistentContext(PROFILE, {
-      executablePath: chromePath(),
-      headless: true,
-      viewport: VIEWPORT,
-      ignoreHTTPSErrors: true,
-      args: [
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--window-size=1280,820',
-      ],
-    });
-    page = context.pages()[0] || await context.newPage();
-    page.setDefaultTimeout(12000);
-    if (page.url() === 'about:blank') {
-      await page.goto(SEARCH_HOME, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-    }
-    launching = null;
-    return page;
-  })().catch((err) => {
-    launching = null;
-    throw err;
-  });
-  return launching;
+// ------------------------------------------------------------------
+// CDP client (one shared connection for input dispatch)
+// ------------------------------------------------------------------
+
+let cdp = null;
+let cdpId = 0;
+const cdpPending = new Map();
+let cdpSessionId = null;
+
+function resetCdp() {
+  try { if (cdp) cdp.close(); } catch (_) {}
+  cdp = null;
+  cdpSessionId = null;
+  cdpPending.clear();
 }
 
-async function readBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  if (!chunks.length) return {};
-  const raw = Buffer.concat(chunks).toString('utf8');
-  try { return JSON.parse(raw); } catch (_) { return {}; }
+function cdpSend(method, params = {}) {
+  return new Promise((resolve, reject) => {
+    if (!cdp || cdp.readyState !== WebSocket.OPEN) {
+      return reject(new Error('CDP not connected'));
+    }
+    const id = ++cdpId;
+    cdpPending.set(id, { resolve, reject });
+    const msg = { id, method, params };
+    if (cdpSessionId) msg.sessionId = cdpSessionId;
+    cdp.send(JSON.stringify(msg));
+    setTimeout(() => {
+      if (cdpPending.has(id)) {
+        cdpPending.delete(id);
+        reject(new Error(`CDP timeout: ${method}`));
+      }
+    }, 10000);
+  });
 }
+
+async function ensureCdp() {
+  if (cdp && cdp.readyState === WebSocket.OPEN && cdpSessionId) return;
+
+  const browserUrl = getCdpUrl();
+  if (!browserUrl) throw new Error('no CDP URL — is agent-browser running?');
+
+  await new Promise((resolve, reject) => {
+    cdp = new WebSocket(browserUrl);
+    cdp.on('open', resolve);
+    cdp.on('error', reject);
+    cdp.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.id && cdpPending.has(msg.id)) {
+          const { resolve, reject } = cdpPending.get(msg.id);
+          cdpPending.delete(msg.id);
+          if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+          else resolve(msg.result);
+        }
+      } catch (_) {}
+    });
+    cdp.on('close', () => { cdp = null; cdpSessionId = null; });
+    setTimeout(() => reject(new Error('CDP connect timeout')), 5000);
+  });
+
+  // Need to attach to the active page target
+  const targets = await cdpSend('Target.getTargets');
+  const pages = (targets.targetInfos || []).filter(t => t.type === 'page');
+  const activeUrl = lastUrl || getCurrentUrl();
+  const page =
+    pages.find(t => activeUrl && t.url === activeUrl) ||
+    pages.find(t => activeUrl && t.url && activeUrl.startsWith(t.url)) ||
+    pages.find(t => t.attached !== false) ||
+    pages[0];
+  if (!page) throw new Error('no page target found');
+
+  const attached = await cdpSend('Target.attachToTarget', { targetId: page.targetId, flatten: true });
+  cdpSessionId = attached.sessionId;
+
+  // Enable the domains we need for nav events + UA override
+  try { await cdpSend('Page.enable'); } catch (_) {}
+  try { await cdpSend('Network.enable'); } catch (_) {}
+
+  // Override the HeadlessChrome UA — Google etc. CAPTCHA on it instantly.
+  const STEALTH_UA = process.env.AGENT_BROWSER_USER_AGENT ||
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+  try {
+    await cdpSend('Network.setUserAgentOverride', {
+      userAgent: STEALTH_UA,
+      acceptLanguage: 'en-US,en;q=0.9',
+      platform: 'MacIntel',
+    });
+    await cdpSend('Emulation.setUserAgentOverride', {
+      userAgent: STEALTH_UA,
+      acceptLanguage: 'en-US,en;q=0.9',
+      platform: 'MacIntel',
+      userAgentMetadata: {
+        platform: 'macOS',
+        platformVersion: '10.15.7',
+        architecture: 'x86',
+        model: '',
+        mobile: false,
+        brands: [
+          { brand: 'Chromium', version: '146' },
+          { brand: 'Google Chrome', version: '146' },
+          { brand: 'Not?A_Brand', version: '24' },
+        ],
+      },
+    });
+  } catch (e) {
+    console.error('UA override failed:', e.message);
+  }
+
+  // Stealth JS — masks navigator.webdriver and other automation tells.
+  // Injected into every page (including subframes) BEFORE site code runs.
+  const STEALTH_JS = `
+    (function() {
+      try {
+        Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });
+        // window.chrome shim
+        if (!window.chrome) window.chrome = {};
+        if (!window.chrome.runtime) window.chrome.runtime = {};
+        // Spoof plugin length (real Chrome has plugins; headless doesn't)
+        Object.defineProperty(Navigator.prototype, 'plugins', {
+          get: () => [
+            { name: 'PDF Viewer', filename: 'internal-pdf-viewer', length: 1 },
+            { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', length: 1 },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', length: 1 },
+          ],
+        });
+        Object.defineProperty(Navigator.prototype, 'languages', {
+          get: () => ['en-US', 'en'],
+          configurable: true,
+        });
+        // Spoof permissions API quirk (headless returns 'denied' for everything)
+        const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (origQuery) {
+          window.navigator.permissions.query = (params) =>
+            params && params.name === 'notifications'
+              ? Promise.resolve({ state: Notification.permission })
+              : origQuery.call(window.navigator.permissions, params);
+        }
+      } catch (e) {}
+    })();
+  `;
+  try {
+    await cdpSend('Page.addScriptToEvaluateOnNewDocument', { source: STEALTH_JS });
+    try { await cdpSend('Runtime.evaluate', { expression: STEALTH_JS }); } catch (_) {}
+
+    // Track CSS viewport — what CDP click events consume. Refresh after each
+    // navigation since some pages do orientation/zoom tricks that change it.
+    await refreshCssViewport();
+    cdp.on('message', (raw) => {
+      try {
+        const m = JSON.parse(raw.toString());
+        if (m.method === 'Page.frameNavigated' && m.params && m.params.frame && !m.params.frame.parentId) {
+          // top-level navigation — refresh viewport on next tick
+          setTimeout(() => { refreshCssViewport().catch(() => {}); }, 200);
+        }
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+async function refreshCssViewport() {
+  try {
+    const r = await cdpSend('Runtime.evaluate', {
+      expression: 'JSON.stringify({w:window.innerWidth,h:window.innerHeight,dpr:window.devicePixelRatio})',
+      returnByValue: true,
+    });
+    const v = r && r.result && r.result.value ? JSON.parse(r.result.value) : null;
+    if (v && v.w > 0 && v.h > 0) {
+      cssViewport = { width: v.w, height: v.h };
+    }
+  } catch (_) { /* CDP not ready yet — try again later */ }
+}
+
+async function cdpClick(x, y, button = 'left', clickCount = 1) {
+  await ensureCdp();
+  await cdpSend('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount });
+  await cdpSend('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount });
+}
+
+async function cdpMouseMove(x, y) {
+  await ensureCdp();
+  await cdpSend('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
+}
+
+async function cdpWheel(x, y, deltaX, deltaY) {
+  await ensureCdp();
+  await cdpSend('Input.dispatchMouseEvent', {
+    type: 'mouseWheel', x, y, button: 'none', deltaX, deltaY
+  });
+}
+
+async function cdpInsertText(text) {
+  await ensureCdp();
+  try {
+    await cdpSend('Input.insertText', { text });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function cdpKey(key) {
+  await ensureCdp();
+  const raw = String(key || '');
+  const parts = raw.split('+').filter(Boolean);
+  const base = parts.length ? parts[parts.length - 1] : raw;
+  const modifiers =
+    (parts.includes('Alt') ? 1 : 0) |
+    (parts.includes('Control') ? 2 : 0) |
+    (parts.includes('Meta') ? 4 : 0) |
+    (parts.includes('Shift') ? 8 : 0);
+  // Map common keys to CDP
+  const keyMap = {
+    Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 },
+    Backspace: { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+    Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
+    Delete: { key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 },
+    Home: { key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 },
+    End: { key: 'End', code: 'End', windowsVirtualKeyCode: 35 },
+    PageUp: { key: 'PageUp', code: 'PageUp', windowsVirtualKeyCode: 33 },
+    PageDown: { key: 'PageDown', code: 'PageDown', windowsVirtualKeyCode: 34 },
+  };
+  const upper = base.length === 1 ? base.toUpperCase() : base;
+  const k = keyMap[base] || {
+    key: base.length === 1 ? base : raw,
+    code: base.length === 1 ? `Key${upper}` : base,
+    windowsVirtualKeyCode: base.length === 1 ? upper.charCodeAt(0) : 0,
+  };
+  await cdpSend('Input.dispatchKeyEvent', { type: 'keyDown', modifiers, ...k });
+  await cdpSend('Input.dispatchKeyEvent', { type: 'keyUp', modifiers, ...k });
+}
+
+async function cdpNavigate(url) {
+  await ensureCdp();
+  await cdpSend('Page.navigate', { url });
+}
+
+// ------------------------------------------------------------------
+// Frame fanout from agent-browser stream WS to our clients
+// ------------------------------------------------------------------
+
+let upstreamWs = null;
+const frameClients = new Set();
+let lastFrame = null; // base64 string for /state
+let lastViewport = VIEWPORT;       // JPEG image dimensions (what user sees + clicks against)
+let cssViewport = { width: 1280, height: 720 };  // CSS pixel viewport (what CDP click events consume)
+let lastUrl = '';
+let lastTitle = '';
+let currentTabs = [];
+let lastError = '';
+let lastFrameAt = 0;
+let lastStreamQuality = 0;
+let lastRecordingPath = '';
+
+function setLastError(err) {
+  lastError = err ? String(err.message || err) : '';
+  if (lastError) console.error('[studio-browser]', lastError);
+}
+
+function sendScreencastStart() {
+  if (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN) return;
+  const quality = frameClients.size > 0 ? STREAM_QUALITY_ACTIVE : STREAM_QUALITY_IDLE;
+  if (quality === lastStreamQuality) return;
+  lastStreamQuality = quality;
+  try { upstreamWs.send(JSON.stringify({ type: 'screencast_start', quality })); } catch (_) {}
+}
+
+function sendScreencastStop() {
+  if (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN) return;
+  lastStreamQuality = 0;
+  try { upstreamWs.send(JSON.stringify({ type: 'screencast_stop' })); } catch (_) {}
+}
+
+function ensureUpstream(force = false) {
+  if (!force && frameClients.size === 0) return;
+  if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) return;
+  const port = getStreamPort();
+  if (!port) return; // no daemon yet — caller will retry
+
+  upstreamWs = new WebSocket(`ws://127.0.0.1:${port}`);
+  upstreamWs.binaryType = 'arraybuffer';
+
+  upstreamWs.on('open', () => {
+    sendScreencastStart();
+  });
+
+  upstreamWs.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+    if (!msg) return;
+
+    if (msg.type === 'frame' && msg.data) {
+      lastFrame = msg.data;
+      lastFrameAt = Date.now();
+      if (msg.metadata) {
+        lastViewport = {
+          width: msg.metadata.deviceWidth || lastViewport.width,
+          height: msg.metadata.deviceHeight || lastViewport.height,
+        };
+      }
+      // Broadcast as binary buffer to clients (no JSON wrap → cheaper)
+      const buf = Buffer.from(msg.data, 'base64');
+      for (const ws of frameClients) {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(buf); } catch (_) {}
+        }
+      }
+    } else if (msg.type === 'tabs') {
+      currentTabs = (msg.tabs || []).map((tab, index) => ({
+        index,
+        active: !!tab.active,
+        tabId: tab.tabId || `t${index + 1}`,
+        title: tab.title || '',
+        url: tab.url || '',
+        type: tab.type || 'page',
+      }));
+      const active = currentTabs.find(t => t.active);
+      if (active) {
+        lastUrl = active.url || lastUrl;
+        lastTitle = active.title || lastTitle;
+      }
+    } else if (msg.type === 'status') {
+      if (msg.viewportWidth) lastViewport.width = msg.viewportWidth;
+      if (msg.viewportHeight) lastViewport.height = msg.viewportHeight;
+    }
+  });
+
+  upstreamWs.on('close', () => {
+    upstreamWs = null;
+    lastStreamQuality = 0;
+    if (frameClients.size > 0) setTimeout(() => ensureUpstream(), 1000);
+  });
+  upstreamWs.on('error', (err) => setLastError(err));
+}
+
+// Re-attempt upstream connect periodically until it sticks
+setInterval(() => {
+  if (frameClients.size > 0 && (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN)) ensureUpstream();
+  if (frameClients.size === 0 && upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+    sendScreencastStop();
+    try { upstreamWs.close(); } catch (_) {}
+  }
+}, 3000);
+
+// Periodically refresh CSS viewport so click scaling stays accurate even if
+// the page mutates window dimensions (e.g. mobile-emulating sites).
+setInterval(() => { refreshCssViewport().catch(() => {}); }, 5000);
+
+// ------------------------------------------------------------------
+// HTTP API (drop-in for old endpoints)
+// ------------------------------------------------------------------
 
 function send(res, status, data) {
   const body = JSON.stringify(data);
@@ -87,97 +490,348 @@ function send(res, status, data) {
   res.end(body);
 }
 
-async function snapshot() {
-  const p = await ensurePage();
-  let image = '';
-  let error = '';
-  try {
-    const png = await p.screenshot({
-      type: 'png',
-      fullPage: false,
-      timeout: 30000,
-      animations: 'disabled',
-      caret: 'hide',
-    });
-    image = `data:image/png;base64,${png.toString('base64')}`;
-  } catch (err) {
-    error = String(err && err.message || err);
-  }
+async function readBody(req) {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  if (!chunks.length) return {};
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { return {}; }
+}
+
+function scalePoint(body) {
+  // body.x / body.y are in the source coord space of body.displayWidth/Height
+  // (the frontend tells us what space it used). The Studio browser widget
+  // clicks against the streamed JPEG frame, so by default map back into the
+  // latest frame dimensions. Keep an explicit CSS mode for old/debug callers.
+  const target =
+    body.coordinateSpace === 'css' || body.targetSpace === 'css'
+      ? cssViewport
+      : lastViewport;
+  const dW = Math.max(1, Number(body.displayWidth || lastViewport.width));
+  const dH = Math.max(1, Number(body.displayHeight || lastViewport.height));
   return {
-    url: p.url(),
-    title: await p.title().catch(() => ''),
-    viewport: VIEWPORT,
-    image,
-    error,
+    x: Math.max(0, Math.min(target.width  - 1, Number(body.x || 0) * target.width  / dW)),
+    y: Math.max(0, Math.min(target.height - 1, Number(body.y || 0) * target.height / dH)),
+  };
+}
+
+function snapshot() {
+  if (!currentTabs.length) currentTabs = getTabs();
+  const active = currentTabs.find(t => t.active);
+  if (active) {
+    lastUrl = active.url || lastUrl;
+    lastTitle = active.title || lastTitle;
+  }
+  // Cheap snapshot: use cached frame + url/title from stream events
+  return {
+    url: lastUrl || getCurrentUrl(),
+    title: lastTitle || getCurrentTitle(),
+    viewport: lastViewport,         // JPEG dims (legacy callers)
+    jpegSize: lastViewport,         // explicit: image pixel dims user clicks against
+    cssViewport: cssViewport,       // CSS pixel viewport CDP uses
+    tabs: currentTabs,
+    activeTabIndex: currentTabs.findIndex(t => t.active),
+    stream: {
+      connected: !!(upstreamWs && upstreamWs.readyState === WebSocket.OPEN),
+      clients: frameClients.size,
+      quality: lastStreamQuality,
+      lastFrameAt,
+    },
+    recordingPath: lastRecordingPath || '',
+    error: lastError,
+    image: lastFrame ? `data:image/jpeg;base64,${lastFrame}` : '',
     ts: Date.now(),
   };
 }
 
-function scalePoint(body) {
-  const displayW = Math.max(1, Number(body.displayWidth || VIEWPORT.width));
-  const displayH = Math.max(1, Number(body.displayHeight || VIEWPORT.height));
-  return {
-    x: Math.max(0, Math.min(VIEWPORT.width - 1, Number(body.x || 0) * VIEWPORT.width / displayW)),
-    y: Math.max(0, Math.min(VIEWPORT.height - 1, Number(body.y || 0) * VIEWPORT.height / displayH)),
-  };
+function resolveRecordingPath(requestPath) {
+  fs.mkdirSync(RECORDING_DIR, { recursive: true });
+  const raw = String(requestPath || '').trim();
+  if (!raw) return path.join(RECORDING_DIR, `studio-${Date.now()}.webm`);
+  const resolved = path.resolve(raw.startsWith('/') ? raw : path.join(RECORDING_DIR, raw));
+  const allowedRoot = path.resolve('/opt/data');
+  if (!resolved.startsWith(`${allowedRoot}/`)) {
+    throw new Error('recording path must be under /opt/data');
+  }
+  return resolved.endsWith('.webm') ? resolved : `${resolved}.webm`;
 }
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' });
+    return res.end();
+  }
   try {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
-    if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true });
-    if (req.method === 'GET' && url.pathname === '/state') return send(res, 200, await snapshot());
+
+    if (req.method === 'GET' && url.pathname === '/health') {
+      return send(res, 200, {
+        ok: true,
+        streamClients: frameClients.size,
+        streamConnected: !!(upstreamWs && upstreamWs.readyState === WebSocket.OPEN),
+        lastError,
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/state') {
+      ensureBrowser();
+      if (frameClients.size > 0 || !lastFrame) ensureUpstream(true);
+      return send(res, 200, snapshot());
+    }
+
+    if (req.method === 'GET' && url.pathname === '/snapshot') {
+      ensureBrowser();
+      const interactive = url.searchParams.get('interactive');
+      const compact = url.searchParams.get('compact');
+      const args = ['snapshot'];
+      if (interactive === '1' || interactive === 'true') args.push('--interactive');
+      if (compact !== '0' && compact !== 'false') args.push('--compact');
+      const snap = abJSON(args);
+      if (!snap || snap.success === false) {
+        return send(res, 500, { error: (snap && snap.error) || 'snapshot failed' });
+      }
+      return send(res, 200, { ...snap.data, state: snapshot() });
+    }
 
     const body = await readBody(req);
-    const p = await ensurePage();
 
     if (req.method === 'POST' && url.pathname === '/navigate') {
-      await p.goto(normalizeUrl(body.url), { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
-      return send(res, 200, await snapshot());
+      ensureBrowser();
+      ensureUpstream(true);
+      const target = normalizeUrl(body.url);
+      const oldUrl = lastUrl;
+      try {
+        await cdpNavigate(target);
+      } catch (_) {
+        try { await abRun(['open', target]); } catch (e) {}
+      }
+      // Wait up to 5s for lastUrl to update via the streaming tabs event,
+      // then refresh from agent-browser CLI as a fallback. This way the
+      // response carries the actual post-nav URL/title.
+      const waitUntil = Date.now() + 5000;
+      while (lastUrl === oldUrl && Date.now() < waitUntil) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (lastUrl === oldUrl) {
+        // Streaming tabs event hasn't fired — query CLI directly
+        const cliUrl = getCurrentUrl();
+        const cliTitle = getCurrentTitle();
+        if (cliUrl) lastUrl = cliUrl;
+        if (cliTitle) lastTitle = cliTitle;
+      }
+      currentTabs = getTabs();
+      return send(res, 200, snapshot());
     }
+
     if (req.method === 'POST' && url.pathname === '/reload') {
-      await p.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-      return send(res, 200, await snapshot());
+      try { await abRun(['reload']); } catch (_) {}
+      return send(res, 200, snapshot());
     }
     if (req.method === 'POST' && url.pathname === '/back') {
-      await p.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      return send(res, 200, await snapshot());
+      try { await abRun(['back']); } catch (_) {}
+      return send(res, 200, snapshot());
     }
     if (req.method === 'POST' && url.pathname === '/forward') {
-      await p.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      return send(res, 200, await snapshot());
+      try { await abRun(['forward']); } catch (_) {}
+      return send(res, 200, snapshot());
     }
     if (req.method === 'POST' && url.pathname === '/click') {
-      const point = scalePoint(body);
-      await p.mouse.click(point.x, point.y);
-      return send(res, 200, await snapshot());
+      const pt = scalePoint(body);
+      try { await cdpClick(pt.x, pt.y, body.button === 'right' ? 'right' : 'left', Number(body.clickCount || 1)); }
+      catch (e) { return send(res, 500, { error: e.message }); }
+      return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/scroll') {
-      const point = scalePoint(body);
-      await p.mouse.move(point.x, point.y);
-      await p.mouse.wheel(Number(body.deltaX || 0), Number(body.deltaY || 0));
-      return send(res, 200, await snapshot());
+      const pt = scalePoint(body);
+      try {
+        await cdpMouseMove(pt.x, pt.y);
+        await cdpWheel(pt.x, pt.y, Number(body.deltaX || 0), Number(body.deltaY || 0));
+      } catch (e) { return send(res, 500, { error: e.message }); }
+      return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/type') {
-      await p.keyboard.type(String(body.text || ''), { delay: 5 });
-      return send(res, 200, await snapshot());
+      const text = String(body.text || '');
+      if (text) {
+        const ok = await cdpInsertText(text);
+        if (!ok) {
+          // Last resort: use CLI
+          try { await abRun(['keyboard', 'type', text]); } catch (_) {}
+        }
+      }
+      return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/key') {
-      await p.keyboard.press(String(body.key || 'Enter'));
-      return send(res, 200, await snapshot());
+      try { await cdpKey(String(body.key || 'Enter')); }
+      catch (e) { return send(res, 500, { error: e.message }); }
+      return send(res, 200, { ok: true });
     }
+    if (req.method === 'POST' && url.pathname === '/tab/new') {
+      const target = body.url ? normalizeUrl(body.url) : '';
+      try {
+        await abRun(['tab', 'new']);
+        if (target) {
+          await abRun(['open', target]);
+        }
+        resetCdp();
+        await new Promise(r => setTimeout(r, 500));
+        currentTabs = getTabs();
+        return send(res, 200, snapshot());
+      } catch (e) {
+        setLastError(e);
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/tab/select') {
+      try {
+        await abRun(['tab', tabRefFromIndex(body.index)]);
+        resetCdp();
+        await new Promise(r => setTimeout(r, 300));
+        currentTabs = getTabs();
+        return send(res, 200, snapshot());
+      } catch (e) {
+        setLastError(e);
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/tab/close') {
+      try {
+        await abRun(['tab', 'close', tabRefFromIndex(body.index)]);
+        resetCdp();
+        await new Promise(r => setTimeout(r, 300));
+        currentTabs = getTabs();
+        return send(res, 200, snapshot());
+      } catch (e) {
+        setLastError(e);
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/record/start') {
+      try {
+        const recordPath = resolveRecordingPath(body.path);
+        await abRun(['record', 'start', recordPath]);
+        lastRecordingPath = recordPath;
+        return send(res, 200, { ok: true, path: recordPath, ...snapshot() });
+      } catch (e) {
+        setLastError(e);
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/record/stop') {
+      try {
+        await abRun(['record', 'stop']);
+        const recordPath = lastRecordingPath;
+        lastRecordingPath = '';
+        return send(res, 200, { ok: true, path: recordPath, ...snapshot() });
+      } catch (e) {
+        setLastError(e);
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/cookies/import') {
+      // Use CDP Network.setCookies — agent-browser doesn't expose this directly
+      await ensureCdp();
+      const cookies = Array.isArray(body.cookies) ? body.cookies : [];
+      try {
+        const normalized = cookies.map(c => ({
+          name: String(c.name),
+          value: String(c.value),
+          domain: c.domain || '',
+          path: c.path || '/',
+          expires: typeof c.expires === 'number' ? c.expires : -1,
+          httpOnly: !!c.httpOnly,
+          secure: c.secure !== false,
+          sameSite: c.sameSite || 'Lax',
+        })).filter(c => c.name && c.value && c.domain);
+        await cdpSend('Network.setCookies', { cookies: normalized });
+        if (body.verifyUrl) {
+          await cdpNavigate(String(body.verifyUrl));
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        return send(res, 200, { imported: normalized.length, ...snapshot() });
+      } catch (e) {
+        return send(res, 500, { error: e.message });
+      }
+    }
+    if (req.method === 'GET' && url.pathname === '/cookies/list') {
+      await ensureCdp();
+      const filter = url.searchParams.get('domain') || '';
+      try {
+        const r = await cdpSend('Network.getAllCookies');
+        const all = r.cookies || [];
+        const filtered = filter ? all.filter(c => (c.domain || '').includes(filter)) : all;
+        return send(res, 200, { cookies: filtered.map(c => ({ name: c.name, domain: c.domain, expires: c.expires })) });
+      } catch (e) {
+        return send(res, 500, { error: e.message });
+      }
+    }
+
     return send(res, 404, { error: 'not found' });
   } catch (err) {
     return send(res, 500, { error: String(err && err.stack || err) });
   }
 });
 
+// ------------------------------------------------------------------
+// Our public WS endpoint: bridge to clients
+// ------------------------------------------------------------------
+
+const wss = new WebSocketServer({ server, path: '/ws/stream' });
+
+wss.on('connection', (ws) => {
+  frameClients.add(ws);
+  ensureBrowser();
+  ensureUpstream(true);
+  sendScreencastStart();
+
+  // Send the most recent frame immediately (avoid black on first connect)
+  if (lastFrame) {
+    try { ws.send(Buffer.from(lastFrame, 'base64')); } catch (_) {}
+  }
+
+  ws.on('message', async (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+    if (!msg || !msg.type) return;
+    try {
+      if (msg.type === 'click') {
+        const pt = scalePoint(msg);
+        await cdpClick(pt.x, pt.y, msg.button === 'right' ? 'right' : 'left', Number(msg.clickCount || 1));
+      } else if (msg.type === 'mousemove') {
+        const pt = scalePoint(msg);
+        await cdpMouseMove(pt.x, pt.y);
+      } else if (msg.type === 'wheel') {
+        const pt = scalePoint(msg);
+        await cdpWheel(pt.x, pt.y, Number(msg.deltaX || 0), Number(msg.deltaY || 0));
+      } else if (msg.type === 'type') {
+        const text = String(msg.text || '');
+        if (text) {
+          const ok = await cdpInsertText(text);
+          if (!ok) { try { await abRun(['keyboard', 'type', text]); } catch (_) {} }
+        }
+      } else if (msg.type === 'key') {
+        await cdpKey(String(msg.key || 'Enter'));
+      } else if (msg.type === 'navigate') {
+        try { await cdpNavigate(normalizeUrl(msg.url)); }
+        catch (_) { try { await abRun(['open', normalizeUrl(msg.url)]); } catch (_) {} }
+      }
+    } catch (err) {
+      try { ws.send(JSON.stringify({ type: 'error', error: String(err.message || err) })); } catch (_) {}
+    }
+  });
+
+  ws.on('close', () => {
+    frameClients.delete(ws);
+    if (frameClients.size === 0) sendScreencastStop();
+  });
+});
+
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`studio-browser-server listening on ${PORT}`);
+  console.log(`studio-browser-server (agent-browser shim) listening on ${PORT}`);
+  ensureBrowser();
 });
 
 async function shutdown() {
-  try { if (context) await context.close(); } catch (_) {}
+  try { if (cdp) cdp.close(); } catch (_) {}
+  try { if (upstreamWs) upstreamWs.close(); } catch (_) {}
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);
