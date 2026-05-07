@@ -70,3 +70,8 @@ mini-swe-agent/
 result
 website/static/api/skills-index.json
 models-dev-upstream/
+
+# safe-update / local-edit safety
+*.bak
+*.bak.*
+

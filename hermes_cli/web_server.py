@@ -682,15 +682,26 @@ async def restart_gateway():
 
 
 @app.post("/api/hermes/update")
-async def update_hermes(legacy: bool = False):
-    """Kick off the safe-update wrapper by default; ?legacy=1 falls back to bare ``hermes update``.
+async def update_hermes(legacy: bool = False, confirm: bool = False, dry: bool = False):
+    """Kick off the safe-update wrapper by default.
 
-    The dashboard "Update Hermes" button hits this endpoint. We route it
-    through /opt/data/scripts/safe-update.sh so local changes are committed
-    + pushed to the user's GitHub fork before pulling upstream, and merge
-    conflicts halt cleanly with a structured report at /api/hermes/safe-update/result.
+    Query params:
+      dry=1        -> safe-update with --dry-run (snapshot + fetch only, no merge)
+      legacy=1     -> bare ``hermes update`` (DESTRUCTIVE; requires confirm=true)
+      confirm=true -> required when legacy=1
+
+    The dashboard "Update Hermes" button hits this endpoint with no params,
+    routing through /opt/data/scripts/safe-update.sh so local changes are
+    committed + pushed to the user's GitHub fork before pulling upstream.
     """
     if legacy:
+        if not confirm:
+            _log.warning("blocked legacy update attempt without confirm=true")
+            raise HTTPException(
+                status_code=400,
+                detail="legacy=1 requires confirm=true. The legacy path runs bare 'hermes update' which has previously wiped .venv/bin, node_modules, and web_dist. Use the default safe-update path instead.",
+            )
+        _log.warning("LEGACY UPDATE PATH invoked with confirm=true — bypassing snapshot/rollback safety")
         try:
             proc = _spawn_hermes_action(["update"], "hermes-update")
         except Exception as exc:
@@ -707,12 +718,16 @@ async def update_hermes(legacy: bool = False):
     log_path = _ACTION_LOG_DIR / log_file_name
     log_file = open(log_path, "ab", buffering=0)
     log_file.write(
-        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')}{' (dry-run)' if dry else ''} ===\n".encode()
     )
+
+    cmd = ["sudo", "-n", _SAFE_UPDATE_SCRIPT]
+    if dry:
+        cmd.append("--dry-run")
 
     try:
         proc = subprocess.Popen(
-            ["sudo", "-n", _SAFE_UPDATE_SCRIPT],
+            cmd,
             cwd=str(PROJECT_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=log_file,
@@ -724,8 +739,6 @@ async def update_hermes(legacy: bool = False):
         raise HTTPException(status_code=500, detail=f"Failed to start safe-update: {exc}")
 
     _ACTION_PROCS[name] = proc
-    # Symlink hermes-update.log -> hermes-safe-update.log so the existing
-    # frontend status poller (calling /api/actions/hermes-update/status) keeps working.
     legacy_log = _ACTION_LOG_DIR / _ACTION_LOG_FILES["hermes-update"]
     try:
         if legacy_log.exists() or legacy_log.is_symlink():
@@ -735,7 +748,7 @@ async def update_hermes(legacy: bool = False):
         pass
     _ACTION_PROCS["hermes-update"] = proc
 
-    return {"ok": True, "pid": proc.pid, "name": "hermes-update", "mode": "safe"}
+    return {"ok": True, "pid": proc.pid, "name": "hermes-update", "mode": "dry-run" if dry else "safe"}
 
 
 # Safe update — durable, conflict-aware wrapper around `hermes update`.
@@ -2471,8 +2484,10 @@ def _ensure_studio_browser() -> None:
             raise HTTPException(status_code=500, detail="Studio browser helper missing")
         env = dict(os.environ)
         env.setdefault("STUDIO_BROWSER_PORT", str(_STUDIO_BROWSER_PORT))
+        env.setdefault("NODE_PATH", "/opt/data/scripts/studio-browser/node_modules")
+        node_bin = "/opt/node-v22/bin/node" if os.path.exists("/opt/node-v22/bin/node") else "node"
         _STUDIO_BROWSER_PROCESS = subprocess.Popen(
-            ["node", str(script)],
+            [node_bin, str(script)],
             cwd=str(PROJECT_ROOT),
             env=env,
             stdout=subprocess.DEVNULL,
