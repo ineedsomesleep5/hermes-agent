@@ -29,6 +29,29 @@ const VIEWPORT = { width: 1280, height: 820 };
 const STREAM_QUALITY_ACTIVE = Number(process.env.STUDIO_BROWSER_STREAM_QUALITY_ACTIVE || 55);
 const STREAM_QUALITY_IDLE = Number(process.env.STUDIO_BROWSER_STREAM_QUALITY_IDLE || 35);
 const RECORDING_DIR = process.env.STUDIO_BROWSER_RECORDING_DIR || '/opt/data/studio/browser-recordings';
+const AB_SESSION = process.env.AGENT_BROWSER_SESSION || 'studio';
+const AB_SESSION_NAME = process.env.AGENT_BROWSER_SESSION_NAME || AB_SESSION;
+const AB_PROFILE = process.env.AGENT_BROWSER_PROFILE || '/opt/data/profiles/supervisor/home/.studio-browser-profile';
+
+function abArgs(args, launchOptions = false) {
+  const out = [...args, '--session', AB_SESSION, '--session-name', AB_SESSION_NAME];
+  if (launchOptions) {
+    out.push('--profile', AB_PROFILE);
+    if (process.env.AGENT_BROWSER_USER_AGENT) out.push('--user-agent', process.env.AGENT_BROWSER_USER_AGENT);
+    if (process.env.AGENT_BROWSER_ARGS) out.push('--args', process.env.AGENT_BROWSER_ARGS);
+  }
+  return out;
+}
+
+function abEnv(launchOptions = false) {
+  const env = { ...process.env };
+  if (!launchOptions) {
+    delete env.AGENT_BROWSER_PROFILE;
+    delete env.AGENT_BROWSER_USER_AGENT;
+    delete env.AGENT_BROWSER_ARGS;
+  }
+  return env;
+}
 
 // ------------------------------------------------------------------
 // agent-browser CLI helpers
@@ -37,7 +60,7 @@ const RECORDING_DIR = process.env.STUDIO_BROWSER_RECORDING_DIR || '/opt/data/stu
 function abJSON(args) {
   // Run `agent-browser ...args --json` synchronously, return parsed obj or null
   try {
-    const out = execFileSync(AB_BIN, [...args, '--json'], { timeout: 15000, encoding: 'utf8' });
+    const out = execFileSync(AB_BIN, [...abArgs(args), '--json'], { timeout: 15000, encoding: 'utf8', env: abEnv() });
     return JSON.parse(out);
   } catch (err) {
     return null;
@@ -47,7 +70,7 @@ function abJSON(args) {
 function abRun(args) {
   // Run async, fire-and-forget (used for click/type/press where we don't need stdout)
   return new Promise((resolve, reject) => {
-    const child = spawn(AB_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(AB_BIN, abArgs(args), { stdio: ['ignore', 'pipe', 'pipe'], env: abEnv() });
     let stdout = '', stderr = '';
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
@@ -67,19 +90,19 @@ function getStreamPort() {
 
 function getCdpUrl() {
   try {
-    return execFileSync(AB_BIN, ['get', 'cdp-url'], { timeout: 5000, encoding: 'utf8' }).trim();
+    return execFileSync(AB_BIN, abArgs(['get', 'cdp-url']), { timeout: 5000, encoding: 'utf8', env: abEnv() }).trim();
   } catch (_) { return null; }
 }
 
 function getCurrentUrl() {
   try {
-    return execFileSync(AB_BIN, ['get', 'url'], { timeout: 5000, encoding: 'utf8' }).trim();
+    return execFileSync(AB_BIN, abArgs(['get', 'url']), { timeout: 5000, encoding: 'utf8', env: abEnv() }).trim();
   } catch (_) { return ''; }
 }
 
 function getCurrentTitle() {
   try {
-    return execFileSync(AB_BIN, ['get', 'title'], { timeout: 5000, encoding: 'utf8' }).trim();
+    return execFileSync(AB_BIN, abArgs(['get', 'title']), { timeout: 5000, encoding: 'utf8', env: abEnv() }).trim();
   } catch (_) { return ''; }
 }
 
@@ -109,7 +132,7 @@ function ensureBrowser() {
   const url = getCurrentUrl();
   if (!url || url === 'about:blank' || url === '') {
     try {
-      execFileSync(AB_BIN, ['open', SEARCH_HOME], { timeout: 30000, stdio: 'ignore' });
+      execFileSync(AB_BIN, abArgs(['open', SEARCH_HOME], true), { timeout: 30000, stdio: 'ignore', env: abEnv(true) });
     } catch (_) {}
   }
 }
@@ -384,6 +407,7 @@ let lastError = '';
 let lastFrameAt = 0;
 let lastStreamQuality = 0;
 let lastRecordingPath = '';
+let lastMetadataRefreshAt = 0;
 
 function setLastError(err) {
   lastError = err ? String(err.message || err) : '';
@@ -402,6 +426,25 @@ function sendScreencastStop() {
   if (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN) return;
   lastStreamQuality = 0;
   try { upstreamWs.send(JSON.stringify({ type: 'screencast_stop' })); } catch (_) {}
+}
+
+function refreshActiveMetadata(force = false) {
+  const now = Date.now();
+  if (!force && now - lastMetadataRefreshAt < 1000) return;
+  lastMetadataRefreshAt = now;
+  const tabs = getTabs();
+  if (tabs.length) {
+    currentTabs = tabs;
+    const active = currentTabs.find(t => t.active);
+    if (active) {
+      lastUrl = active.url || lastUrl;
+      lastTitle = active.title || lastTitle;
+    }
+  }
+  const cliUrl = getCurrentUrl();
+  const cliTitle = getCurrentTitle();
+  if (cliUrl) lastUrl = cliUrl;
+  if (cliTitle) lastTitle = cliTitle;
 }
 
 function ensureUpstream(force = false) {
@@ -502,13 +545,13 @@ async function readBody(req) {
 
 function scalePoint(body) {
   // body.x / body.y are in the source coord space of body.displayWidth/Height
-  // (the frontend tells us what space it used). The Studio browser widget
-  // clicks against the streamed JPEG frame, so by default map back into the
-  // latest frame dimensions. Keep an explicit CSS mode for old/debug callers.
+  // (normally the streamed JPEG frame). CDP input events consume CSS viewport
+  // pixels, which can differ from the JPEG dimensions on pages with browser
+  // UI/zoom/device metrics, so frame coords map to cssViewport by default.
   const target =
-    body.coordinateSpace === 'css' || body.targetSpace === 'css'
-      ? cssViewport
-      : lastViewport;
+    body.targetSpace === 'frame'
+      ? lastViewport
+      : cssViewport;
   const dW = Math.max(1, Number(body.displayWidth || lastViewport.width));
   const dH = Math.max(1, Number(body.displayHeight || lastViewport.height));
   return {
@@ -518,12 +561,7 @@ function scalePoint(body) {
 }
 
 function snapshot() {
-  if (!currentTabs.length) currentTabs = getTabs();
-  const active = currentTabs.find(t => t.active);
-  if (active) {
-    lastUrl = active.url || lastUrl;
-    lastTitle = active.title || lastTitle;
-  }
+  refreshActiveMetadata();
   // Cheap snapshot: use cached frame + url/title from stream events
   return {
     url: lastUrl || getCurrentUrl(),
@@ -603,9 +641,11 @@ const server = http.createServer(async (req, res) => {
       const target = normalizeUrl(body.url);
       const oldUrl = lastUrl;
       try {
-        await cdpNavigate(target);
-      } catch (_) {
-        try { await abRun(['open', target]); } catch (e) {}
+        await abRun(['open', target]);
+        resetCdp();
+      } catch (e) {
+        setLastError(e);
+        try { await cdpNavigate(target); } catch (_) {}
       }
       // Wait up to 5s for lastUrl to update via the streaming tabs event,
       // then refresh from agent-browser CLI as a fallback. This way the
@@ -639,32 +679,46 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/click') {
       const pt = scalePoint(body);
-      try { await cdpClick(pt.x, pt.y, body.button === 'right' ? 'right' : 'left', Number(body.clickCount || 1)); }
-      catch (e) { return send(res, 500, { error: e.message }); }
+      try {
+        await abRun(['mouse', 'move', String(Math.round(pt.x)), String(Math.round(pt.y))]);
+        await abRun(['mouse', 'down', body.button === 'right' ? 'right' : 'left']);
+        await abRun(['mouse', 'up', body.button === 'right' ? 'right' : 'left']);
+      } catch (e) {
+        try { await cdpClick(pt.x, pt.y, body.button === 'right' ? 'right' : 'left', Number(body.clickCount || 1)); }
+        catch (err) { return send(res, 500, { error: err.message }); }
+      }
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/scroll') {
       const pt = scalePoint(body);
       try {
-        await cdpMouseMove(pt.x, pt.y);
-        await cdpWheel(pt.x, pt.y, Number(body.deltaX || 0), Number(body.deltaY || 0));
-      } catch (e) { return send(res, 500, { error: e.message }); }
+        await abRun(['mouse', 'move', String(Math.round(pt.x)), String(Math.round(pt.y))]);
+        await abRun(['mouse', 'wheel', String(Math.round(Number(body.deltaY || 0))), String(Math.round(Number(body.deltaX || 0)))]);
+      } catch (e) {
+        try {
+          await cdpMouseMove(pt.x, pt.y);
+          await cdpWheel(pt.x, pt.y, Number(body.deltaX || 0), Number(body.deltaY || 0));
+        } catch (err) { return send(res, 500, { error: err.message }); }
+      }
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/type') {
       const text = String(body.text || '');
       if (text) {
-        const ok = await cdpInsertText(text);
-        if (!ok) {
-          // Last resort: use CLI
-          try { await abRun(['keyboard', 'type', text]); } catch (_) {}
+        try { await abRun(['keyboard', 'inserttext', text]); }
+        catch (_) {
+          const ok = await cdpInsertText(text);
+          if (!ok) { try { await abRun(['keyboard', 'type', text]); } catch (_) {} }
         }
       }
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/key') {
-      try { await cdpKey(String(body.key || 'Enter')); }
-      catch (e) { return send(res, 500, { error: e.message }); }
+      try { await abRun(['press', String(body.key || 'Enter')]); }
+      catch (e) {
+        try { await cdpKey(String(body.key || 'Enter')); }
+        catch (err) { return send(res, 500, { error: err.message }); }
+      }
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/tab/new') {
@@ -797,24 +851,41 @@ wss.on('connection', (ws) => {
     try {
       if (msg.type === 'click') {
         const pt = scalePoint(msg);
-        await cdpClick(pt.x, pt.y, msg.button === 'right' ? 'right' : 'left', Number(msg.clickCount || 1));
+        try {
+          await abRun(['mouse', 'move', String(Math.round(pt.x)), String(Math.round(pt.y))]);
+          await abRun(['mouse', 'down', msg.button === 'right' ? 'right' : 'left']);
+          await abRun(['mouse', 'up', msg.button === 'right' ? 'right' : 'left']);
+        } catch (_) {
+          await cdpClick(pt.x, pt.y, msg.button === 'right' ? 'right' : 'left', Number(msg.clickCount || 1));
+        }
       } else if (msg.type === 'mousemove') {
         const pt = scalePoint(msg);
         await cdpMouseMove(pt.x, pt.y);
       } else if (msg.type === 'wheel') {
         const pt = scalePoint(msg);
-        await cdpWheel(pt.x, pt.y, Number(msg.deltaX || 0), Number(msg.deltaY || 0));
+        try {
+          await abRun(['mouse', 'move', String(Math.round(pt.x)), String(Math.round(pt.y))]);
+          await abRun(['mouse', 'wheel', String(Math.round(Number(msg.deltaY || 0))), String(Math.round(Number(msg.deltaX || 0)))]);
+        } catch (_) {
+          await cdpWheel(pt.x, pt.y, Number(msg.deltaX || 0), Number(msg.deltaY || 0));
+        }
       } else if (msg.type === 'type') {
         const text = String(msg.text || '');
         if (text) {
-          const ok = await cdpInsertText(text);
-          if (!ok) { try { await abRun(['keyboard', 'type', text]); } catch (_) {} }
+          try { await abRun(['keyboard', 'inserttext', text]); }
+          catch (_) {
+            const ok = await cdpInsertText(text);
+            if (!ok) { try { await abRun(['keyboard', 'type', text]); } catch (_) {} }
+          }
         }
       } else if (msg.type === 'key') {
-        await cdpKey(String(msg.key || 'Enter'));
+        try { await abRun(['press', String(msg.key || 'Enter')]); }
+        catch (_) { await cdpKey(String(msg.key || 'Enter')); }
       } else if (msg.type === 'navigate') {
-        try { await cdpNavigate(normalizeUrl(msg.url)); }
-        catch (_) { try { await abRun(['open', normalizeUrl(msg.url)]); } catch (_) {} }
+        try {
+          await abRun(['open', normalizeUrl(msg.url)]);
+          resetCdp();
+        } catch (_) { try { await cdpNavigate(normalizeUrl(msg.url)); } catch (_) {} }
       }
     } catch (err) {
       try { ws.send(JSON.stringify({ type: 'error', error: String(err.message || err) })); } catch (_) {}
