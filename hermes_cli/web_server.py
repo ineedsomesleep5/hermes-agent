@@ -147,34 +147,48 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
 })
 
 
+def _dashboard_extra_allowed_hosts() -> set[str]:
+    """Operator-approved reverse-proxy/Tailscale hostnames.
+
+    The dashboard normally accepts only the hostname it was bound to. For
+    Cloudflare Access or Tailscale routes that terminate externally and forward
+    to a loopback dashboard, operators can set
+    HERMES_DASHBOARD_ALLOWED_HOSTS=host1,host2. This keeps the DNS-rebinding
+    guard intact while allowing known protected ingress hostnames.
+    """
+    raw = os.environ.get("HERMES_DASHBOARD_ALLOWED_HOSTS", "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _host_without_port(host_header: str) -> str:
+    """Normalize a Host header to just the lower-case hostname/address."""
+    h = host_header.strip()
+    if h.startswith("["):
+        close = h.find("]")
+        if close != -1:
+            return h[1:close].lower()
+        return h.strip("[]").lower()
+    return (h.rsplit(":", 1)[0] if ":" in h else h).lower()
+
+
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - Explicit operator allow-list from HERMES_DASHBOARD_ALLOWED_HOSTS
+      for authenticated reverse proxies / Tailscale routes
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
     if not host_header:
         return False
-    # Strip port suffix. IPv6 addresses use bracket notation:
-    #   [::1]         — no port
-    #   [::1]:9119    — with port
-    # Plain hosts/v4:
-    #   localhost:9119
-    #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
+    host_only = _host_without_port(host_header)
+
+    extra_hosts = _dashboard_extra_allowed_hosts()
+    if host_only in extra_hosts:
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
