@@ -1150,7 +1150,28 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # example DeepSeek) for cron jobs that do not pin provider/model.
             runtime_kwargs = {
                 "requested": job.get("provider"),
+                "target_model": model,
             }
+            # Optional per-job credential selection. Useful for routing cheap
+            # recurring Codex jobs to a secondary ChatGPT/Codex account without
+            # changing the user's interactive default account.
+            credential_label = str(job.get("credential_label") or "").strip()
+            if not credential_label:
+                model_credential_labels = _cfg.get("model_credential_labels", {})
+                if isinstance(model_credential_labels, dict):
+                    provider_key = str(job.get("provider") or _cfg.get("model", {}).get("provider") or "").strip().lower()
+                    provider_map = model_credential_labels.get(provider_key) or model_credential_labels.get("*")
+                    if isinstance(provider_map, dict):
+                        credential_label = str(provider_map.get(str(model).strip()) or "").strip()
+            if credential_label:
+                runtime_kwargs["credential_label"] = credential_label
+                runtime_kwargs["promote_credential"] = False
+                logger.info(
+                    "Job '%s': using credential label %r for model %s",
+                    job_id,
+                    credential_label,
+                    model,
+                )
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
             runtime = resolve_runtime_provider(**runtime_kwargs)

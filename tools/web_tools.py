@@ -17,6 +17,7 @@ Backend compatibility:
 - Firecrawl: https://docs.firecrawl.dev/introduction (search, extract, crawl; direct or derived firecrawl-gateway.<domain> for Nous Subscribers)
 - Parallel: https://docs.parallel.ai (search, extract)
 - Tavily: https://tavily.com (search, extract, crawl)
+- TinyFish: https://tinyfish.ai (search, fetch)
 
 LLM Processing:
 - Uses OpenRouter API with Gemini 3 Flash Preview for intelligent content extraction
@@ -126,7 +127,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa", "searxng"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "searxng", "tinyfish"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -135,6 +136,7 @@ def _get_backend() -> str:
     backend_candidates = (
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
         ("parallel", _has_env("PARALLEL_API_KEY")),
+        ("tinyfish", _has_env("TINYFISH_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
@@ -192,6 +194,8 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("PARALLEL_API_KEY")
     if backend == "firecrawl":
         return check_firecrawl_api_key()
+    if backend == "tinyfish":
+        return _has_env("TINYFISH_API_KEY")
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
     if backend == "searxng":
@@ -265,6 +269,7 @@ def _web_requires_env() -> list[str]:
     requires = [
         "EXA_API_KEY",
         "PARALLEL_API_KEY",
+        "TINYFISH_API_KEY",
         "TAVILY_API_KEY",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
@@ -359,6 +364,100 @@ def _get_async_parallel_client():
             )
         _async_parallel_client = AsyncParallel(api_key=api_key)
     return _async_parallel_client
+
+# ─── TinyFish Client ─────────────────────────────────────────────────────────
+
+_TINYFISH_SEARCH_URL = os.getenv("TINYFISH_SEARCH_URL", "https://api.search.tinyfish.ai")
+_TINYFISH_FETCH_URL = os.getenv("TINYFISH_FETCH_URL", "https://api.fetch.tinyfish.ai")
+
+
+def _tinyfish_headers() -> dict[str, str]:
+    """Return TinyFish auth headers."""
+    api_key = os.getenv("TINYFISH_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "TINYFISH_API_KEY environment variable not set. "
+            "Get your API key at https://tinyfish.ai"
+        )
+    return {"X-API-Key": api_key}
+
+
+def _tinyfish_search(query: str, limit: int = 5) -> dict:
+    """Search the web with TinyFish and normalize to Hermes format."""
+    logger.info("TinyFish search: '%s' (limit: %d)", query, limit)
+    response = httpx.get(
+        _TINYFISH_SEARCH_URL,
+        params={"query": query, "max_results": min(limit, 100)},
+        headers=_tinyfish_headers(),
+        timeout=60,
+    )
+    response.raise_for_status()
+    return _normalize_tinyfish_search_results(response.json())
+
+
+def _tinyfish_fetch(urls: List[str]) -> List[Dict[str, Any]]:
+    """Fetch URLs with TinyFish and normalize to Hermes document format."""
+    logger.info("TinyFish fetch: %d URL(s)", len(urls))
+    response = httpx.post(
+        _TINYFISH_FETCH_URL,
+        json={"urls": urls},
+        headers=_tinyfish_headers(),
+        timeout=60,
+    )
+    response.raise_for_status()
+    return _normalize_tinyfish_documents(response.json())
+
+
+def _normalize_tinyfish_search_results(response: dict) -> dict:
+    """Normalize TinyFish search response to the standard web search format."""
+    web_results = []
+    for i, result in enumerate(response.get("results", [])):
+        position = result.get("position")
+        web_results.append({
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "description": result.get("snippet", "") or result.get("description", ""),
+            "position": position if isinstance(position, int) else i + 1,
+        })
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _normalize_tinyfish_documents(response: dict) -> List[Dict[str, Any]]:
+    """Normalize TinyFish fetch response to the standard document format."""
+    documents: List[Dict[str, Any]] = []
+    for result in response.get("results", []):
+        url = result.get("final_url") or result.get("url", "")
+        raw = result.get("text", "") or result.get("content", "") or ""
+        title = result.get("title", "")
+        documents.append({
+            "url": url,
+            "title": title,
+            "content": raw,
+            "raw_content": raw,
+            "metadata": {
+                "sourceURL": url,
+                "title": title,
+                "originalURL": result.get("url", url),
+                "description": result.get("description"),
+                "language": result.get("language"),
+                "author": result.get("author"),
+                "published_date": result.get("published_date"),
+                "format": result.get("format"),
+            },
+        })
+    for error in response.get("errors", []):
+        err_url = error.get("url", "") if isinstance(error, dict) else ""
+        err_msg = error.get("error", "fetch failed") if isinstance(error, dict) else str(error)
+        documents.append({
+            "url": err_url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": err_msg,
+            "metadata": {"sourceURL": err_url},
+        })
+    return documents
+
 
 # ─── Tavily Client ───────────────────────────────────────────────────────────
 
@@ -1190,6 +1289,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             _debug.save()
             return result_json
 
+        if backend == "tinyfish":
+            response_data = _tinyfish_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         if backend == "searxng":
             from tools.web_providers.searxng import SearXNGSearchProvider
             response_data = SearXNGSearchProvider().search(query, limit)
@@ -1343,6 +1451,8 @@ async def web_extract_tool(
                 results = await _parallel_extract(safe_urls)
             elif backend == "exa":
                 results = _exa_extract(safe_urls)
+            elif backend == "tinyfish":
+                results = _tinyfish_fetch(safe_urls)
             elif backend == "tavily":
                 logger.info("Tavily extract: %d URL(s)", len(safe_urls))
                 raw = _tavily_request("extract", {
@@ -1647,6 +1757,14 @@ async def web_crawl_tool(
         effective_model = model or _get_default_summarizer_model()
         auxiliary_available = check_auxiliary_model()
         backend = _get_backend()
+
+        if backend == "tinyfish":
+            return json.dumps({
+                "success": False,
+                "error": "TinyFish supports search and fetch, but not site crawl. "
+                         "Set web.backend to tavily or firecrawl for crawl, and use "
+                         "web.search_backend/web.extract_backend = tinyfish for search/fetch.",
+            }, ensure_ascii=False)
 
         # Tavily supports crawl via its /crawl endpoint
         if backend == "tavily":
@@ -2035,9 +2153,9 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily", "searxng"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "searxng", "tinyfish"):
         return _is_backend_available(configured)
-    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng"))
+    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tinyfish", "tavily", "searxng"))
 
 
 def check_auxiliary_model() -> bool:
@@ -2072,6 +2190,8 @@ if __name__ == "__main__":
             print("   Using Parallel API (https://parallel.ai)")
         elif backend == "tavily":
             print("   Using Tavily API (https://tavily.com)")
+        elif backend == "tinyfish":
+            print("   Using TinyFish APIs (https://tinyfish.ai)")
         elif backend == "searxng":
             print(f"   Using SearXNG (search only): {os.getenv('SEARXNG_URL', '').strip()}")
         else:
@@ -2086,7 +2206,7 @@ if __name__ == "__main__":
     else:
         print("❌ No web search backend configured")
         print(
-            "Set EXA_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, FIRECRAWL_API_URL"
+            "Set EXA_API_KEY, PARALLEL_API_KEY, TINYFISH_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, FIRECRAWL_API_URL"
             f"{_firecrawl_backend_help_suffix()}"
         )
 

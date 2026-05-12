@@ -994,12 +994,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "renderer": _get_embedded_browser_renderer(),
         "size": {"w": 8, "h": 8},
         "description": (
-            "Embedded browser with two modes: iframe (fast, for normal sites) "
-            "and snapshot (real-time WebSocket-streamed headless Chrome with "
-            "stealth + low-latency input — for X, Meta, LinkedIn, and other "
-            "sites that block iframes). Auto-switches to snapshot for known-"
-            "blocked hosts. Click the snapshot to enter typing mode (blue "
-            "border), Esc to release."
+            "Iframe-first embedded browser. Sites that allow frames render "
+            "inside Studio; frame-blocked, login-heavy, or bot-challenged "
+            "sites open in the user's real device browser instead."
         ),
     },
     "skills_grid": {
@@ -1477,5 +1474,4 @@ registry.register(
     check_fn=check_studio_requirements,
     description=LIST_PRESETS_SCHEMA["description"],
 )
-
 

@@ -1,177 +1,135 @@
 cols: 5
 id: embedded-browser
 name: Embedded Browser
-description: A Space Agent-style embedded browser with tabs, URL bar, navigation, screenshot view, and recording. Powered by the Hermes browser backend.
-renderer: |
-  async (parent, space, ctx) => {
-  const authHeaders = () => ({
-    'X-Hermes-Session-Token': window.__HERMES_SESSION_TOKEN__ || '',
-    'Content-Type': 'application/json',
-  });
-
-  const panel = document.createElement('div');
-  panel.style.cssText = `
-    display:flex;flex-direction:column;height:100%;box-sizing:border-box;
-    padding:12px;background:linear-gradient(180deg, rgba(20,20,24,0.98), rgba(10,10,12,0.98));
-    color:#f4f4f5;font-family:-apple-system, Inter, system-ui, sans-serif;overflow:hidden;gap:10px;
-  `;
-
-  const toolbar = document.createElement('div');
-  toolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;flex:0 0 auto;';
-  const btn = (label) => {
-    const el = document.createElement('button');
-    el.type = 'button';
-    el.textContent = label;
-    el.style.cssText = 'border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:#f4f4f5;border-radius:8px;padding:7px 10px;font-size:12px;font-weight:600;cursor:pointer;';
-    el.onmouseenter = () => el.style.background = 'rgba(255,255,255,0.09)';
-    el.onmouseleave = () => el.style.background = 'rgba(255,255,255,0.05)';
-    return el;
-  };
-  const back = btn('←');
-  const forward = btn('→');
-  const reload = btn('↻');
-  const newTab = btn('+ Tab');
-  const record = btn('● Recording');
-  const open = btn('Open');
-  const url = document.createElement('input');
-  url.type = 'text';
-  url.placeholder = 'https://example.com';
-  url.autocomplete = 'off';
-  url.spellcheck = false;
-  url.style.cssText = 'flex:1 1 260px;min-width:180px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#f4f4f5;padding:8px 10px;font-size:13px;outline:none;box-sizing:border-box;';
-  const go = btn('Go');
-  toolbar.append(back, forward, reload, newTab, record, url, go, open);
-
-  const meta = document.createElement('div');
-  meta.style.cssText = 'display:flex;flex-direction:column;gap:2px;flex:0 0 auto;min-width:0;';
-  const title = document.createElement('div');
-  title.style.cssText = 'font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-  const subtitle = document.createElement('div');
-  subtitle.style.cssText = 'font-size:11px;color:rgba(255,255,255,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-  const error = document.createElement('div');
-  error.style.cssText = 'font-size:11px;color:#ff9b9b;white-space:normal;display:none;';
-  meta.append(title, subtitle, error);
-
-  const tabStrip = document.createElement('div');
-  tabStrip.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:0 0 auto;';
-
-  const viewport = document.createElement('div');
-  viewport.style.cssText = 'position:relative;flex:1 1 auto;min-height:0;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);background:#000;';
-  const img = document.createElement('img');
-  img.alt = 'Embedded browser screenshot';
-  img.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;background:#000;';
-  const empty = document.createElement('div');
-  empty.textContent = 'Loading embedded browser…';
-  empty.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:rgba(255,255,255,0.55);background:radial-gradient(circle at center, rgba(255,255,255,0.05), rgba(0,0,0,0.92));';
-  viewport.append(img, empty);
-
-  panel.append(toolbar, meta, tabStrip, viewport);
-  parent.append(panel);
-
-  let alive = true;
-  async function request(path, body) {
-    const endpoint = path.startsWith('/api/') ? path : `/api/studio/browser/${path}`;
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: body ? JSON.stringify(body) : '{}',
-    });
-    if (!res.ok) {
-      throw new Error(await res.text());
-    }
-  }
-
-  function renderTabs(tabs) {
-    tabStrip.innerHTML = '';
-    const list = Array.isArray(tabs) ? tabs : [];
-    if (!list.length) {
-      const hint = document.createElement('div');
-      hint.textContent = 'No tabs yet';
-      hint.style.cssText = 'font-size:11px;color:rgba(255,255,255,0.48);padding:2px 0;';
-      tabStrip.append(hint);
-      return;
-    }
-    list.forEach((tab) => {
-      const tabBtn = document.createElement('button');
-      tabBtn.type = 'button';
-      const label = tab.title || tab.url || `Tab ${tab.index + 1}`;
-      tabBtn.textContent = tab.active ? `• ${label}` : label;
-      tabBtn.style.cssText = tab.active
-        ? 'border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.14);color:#fff;border-radius:999px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
-        : 'border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#f4f4f5;border-radius:999px;padding:6px 10px;font-size:11px;font-weight:600;cursor:pointer;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-      tabBtn.onclick = () => request('/api/studio/browser/tab/select', { index: tab.index }).then(refresh).catch(refresh);
-      tabStrip.append(tabBtn);
-    });
-  }
-
-  async function refresh() {
-    try {
-      const res = await fetch('/api/studio/browser/state', { headers: authHeaders() });
-      if (!res.ok) throw new Error(await res.text());
-      const state = await res.json();
-      url.value = state.url || url.value;
-      title.textContent = state.title || 'Embedded Browser';
-      subtitle.textContent = state.url || 'No URL loaded yet';
-      error.style.display = state.error ? 'block' : 'none';
-      error.textContent = state.error || '';
-      record.textContent = state.recording ? '■ Stop Recording' : '● Recording';
-      renderTabs(state.tabs);
-      if (state.image) img.src = state.image;
-      empty.style.display = state.image ? 'none' : 'flex';
-      if (!state.image) empty.textContent = 'Loading embedded browser…';
-    } catch (err) {
-      title.textContent = 'Embedded Browser';
-      subtitle.textContent = 'Browser helper unavailable';
-      error.style.display = 'block';
-      error.textContent = String(err && err.message ? err.message : err);
-      empty.style.display = 'flex';
-      empty.textContent = 'Embedded browser failed to load';
-      tabStrip.innerHTML = '';
-    }
-  }
-
-  const openUrl = async (value) => {
-    const next = (value || '').trim();
-    if (!next) return;
-    await request('navigate', { url: next });
-    await refresh();
-  };
-
-  const createTab = async () => {
-    await request('/api/studio/browser/tab/new', {});
-    await refresh();
-  };
-
-  const toggleRecord = async () => {
-    const res = await fetch('/api/studio/browser/state', { headers: authHeaders() });
-    if (!res.ok) throw new Error(await res.text());
-    const state = await res.json();
-    if (state.recording) {
-      await request('/api/studio/browser/record/stop', {});
-    } else {
-      await request('/api/studio/browser/record/start', {});
-    }
-    await refresh();
-  };
-
-  back.onclick = () => request('back', {}).then(refresh).catch(refresh);
-  forward.onclick = () => request('forward', {}).then(refresh).catch(refresh);
-  reload.onclick = () => request('reload', {}).then(refresh).catch(refresh);
-  newTab.onclick = () => createTab().catch(refresh);
-  record.onclick = () => toggleRecord().catch(refresh);
-  go.onclick = () => openUrl(url.value).catch(refresh);
-  open.onclick = () => {
-    const next = (url.value || '').trim();
-    if (next) window.open(next, '_blank', 'noopener,noreferrer');
-  };
-  url.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') {
-      ev.preventDefault();
-      void openUrl(url.value).catch(refresh);
-    }
-  });
-
-  const timer = window.setInterval(() => { if (alive) void refresh(); }, 1500);
-  await refresh();
-  return { cleanup: () => { alive = false; window.clearInterval(timer); } };
-}
+description: Iframe-first embedded browser for fast Studio use. Defaults to Google,
+  keeps a local back/forward history stack, and shows a clear external-open fallback
+  for known iframe-blocked sites.
+renderer: "async (parent, spaceRef) => {\n  parent.style.cssText = \"position:relative;height:100%;display:flex;flex-direction:column;background:#151518;border-radius:8px;overflow:hidden;font-family:-apple-system,\
+  \ Inter, system-ui, sans-serif;\";\n\n  const BLANK_URL = 'about:blank';\n  const\
+  \ GOOGLE_HOME_URL = 'https://google.com/';\n  const DEFAULT_URL = GOOGLE_HOME_URL;\n\
+  \  const SEARCH_URL = 'https://www.google.com/search?q=';\n  const EXTERNAL_HOSTS\
+  \ = [\n    'accounts.google.com',\n    'bitbucket.org',\n    'facebook.com',\n \
+  \   'github.com',\n    'gitlab.com',\n    'instagram.com',\n    'linkedin.com',\n\
+  \    'notion.so',\n    'reddit.com',\n    'slack.com',\n    'twitter.com',\n   \
+  \ 'x.com',\n    'youtube.com'\n  ];\n\n  let currentUrl = DEFAULT_URL;\n  let history\
+  \ = [];\n  let historyIndex = -1;\n  let suppressNextLoadHistory = false;\n\n  function\
+  \ googleIframeUrl(url) {\n    try {\n      const parsed = new URL(url);\n      const\
+  \ host = parsed.hostname.toLowerCase().replace(/^www\\./, '');\n      if (host !==\
+  \ 'google.com') return parsed.toString();\n      if (parsed.pathname === '/' ||\
+  \ parsed.pathname === '/webhp') return GOOGLE_HOME_URL;\n      if (parsed.pathname\
+  \ === '/search') {\n        parsed.hostname = 'www.google.com';\n        return\
+  \ parsed.toString();\n      }\n      return parsed.toString();\n    } catch (_)\
+  \ {\n      return url;\n    }\n  }\n\n  function normalize(rawValue) {\n    const\
+  \ raw = String(rawValue || '').trim();\n    if (!raw) return DEFAULT_URL;\n    if\
+  \ (raw === BLANK_URL) return raw;\n    if (/^https?:\\/\\//i.test(raw)) return googleIframeUrl(raw);\n\
+  \    if (/^localhost(:\\d+)?(\\/|$)/i.test(raw) || /^127\\.0\\.0\\.1(:\\d+)?(\\\
+  /|$)/.test(raw)) return 'http://' + raw;\n    if (/^[a-z0-9.-]+\\.[a-z]{2,}(\\/|$|\\\
+  ?|#)/i.test(raw)) return googleIframeUrl('https://' + raw);\n    return SEARCH_URL\
+  \ + encodeURIComponent(raw);\n  }\n\n  function hostOf(url) {\n    try { return\
+  \ new URL(url).hostname.toLowerCase().replace(/^www\\./, ''); }\n    catch (_) {\
+  \ return ''; }\n  }\n\n  function shouldOpenExternally(url, rawValue) {\n    const\
+  \ host = hostOf(url);\n    return EXTERNAL_HOSTS.some(item => host === item || host.endsWith('.'\
+  \ + item));\n  }\n\n  function setStatus(message) {\n    status.textContent = message\
+  \ || '';\n    status.style.opacity = message ? '1' : '0';\n    if (message) {\n\
+  \      clearTimeout(setStatus._timer);\n      setStatus._timer = setTimeout(() =>\
+  \ { status.style.opacity = '0'; }, 3200);\n    }\n  }\n\n  function setAddress(url)\
+  \ {\n    currentUrl = url || DEFAULT_URL;\n    address.value = currentUrl === BLANK_URL\
+  \ ? '' : currentUrl;\n    openBtn.disabled = currentUrl === BLANK_URL;\n    reloadBtn.disabled\
+  \ = currentUrl === BLANK_URL;\n    backBtn.disabled = historyIndex <= 0;\n    forwardBtn.disabled\
+  \ = historyIndex < 0 || historyIndex >= history.length - 1;\n  }\n\n  function pushHistory(url)\
+  \ {\n    if (!url || url === BLANK_URL) return;\n    if (history[historyIndex] ===\
+  \ url) return;\n    history = history.slice(0, historyIndex + 1);\n    history.push(url);\n\
+  \    historyIndex = history.length - 1;\n    setAddress(url);\n  }\n\n  function\
+  \ showExternalFallback(url, autoOpen = false) {\n    if (!url || url === BLANK_URL)\
+  \ return;\n    setAddress(url);\n    iframe.removeAttribute('src');\n    fallbackTitle.textContent\
+  \ = `${hostOf(url) || 'This site'} blocks iframe browsing`;\n    fallbackText.textContent\
+  \ = 'Open it in your device browser. The Studio address and history stay in sync\
+  \ here.';\n    fallbackUrl.textContent = url;\n    fallback.style.display = 'flex';\n\
+  \    modePill.textContent = 'external';\n    modePill.style.borderColor = 'rgba(255,190,80,.72)';\n\
+  \    modePill.style.background = 'rgba(255,190,80,.14)';\n    modePill.style.color\
+  \ = '#ffd48a';\n    let opened = null;\n    if (autoOpen) opened = window.open(url,\
+  \ '_blank', 'noopener,noreferrer');\n    setStatus(opened ? 'opened in this device\
+  \ browser' : 'use Open to continue');\n  }\n\n  function clearExternalFallback()\
+  \ {\n    fallback.style.display = 'none';\n    modePill.textContent = 'iframe';\n\
+  \    modePill.style.borderColor = 'rgba(66,133,244,.65)';\n    modePill.style.background\
+  \ = 'rgba(66,133,244,.12)';\n    modePill.style.color = '#9ec1ff';\n  }\n\n  function\
+  \ loadIframe(rawValue, options = {}) {\n    const url = normalize(rawValue);\n \
+  \   if (url === BLANK_URL) {\n      iframe.removeAttribute('src');\n      clearExternalFallback();\n\
+  \      setAddress(BLANK_URL);\n      setStatus('');\n      return;\n    }\n    if\
+  \ (!options.forceIframe && shouldOpenExternally(url, rawValue)) {\n      if (!options.skipHistory)\
+  \ pushHistory(url);\n      showExternalFallback(url, options.autoOpen !== false);\n\
+  \      return;\n    }\n    clearExternalFallback();\n    setAddress(url);\n    if\
+  \ (!options.skipHistory) pushHistory(url);\n    suppressNextLoadHistory = !!options.skipHistory;\n\
+  \    iframe.src = url;\n    setStatus('loading iframe');\n  }\n\n  const header\
+  \ = document.createElement('div');\n  header.style.cssText = \"display:flex;padding:10px;background:linear-gradient(180deg,\
+  \ rgba(19,19,22,0.98), rgba(9,9,11,0.98));border-bottom:1px solid #303039;gap:8px;align-items:center;min-width:0;\"\
+  ;\n  parent.appendChild(header);\n\n  function makeBtn(label, title) {\n    const\
+  \ b = document.createElement('button');\n    b.innerHTML = label;\n    b.title =\
+  \ title || '';\n    b.style.cssText = \"height:34px;min-width:38px;padding:0 10px;border-radius:4px;border:1px\
+  \ solid #444;background:#2d2d2d;color:white;cursor:pointer;font-size:14px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;\"\
+  ;\n    b.onmouseenter = () => { if (!b.disabled) b.style.background = '#3a3a3a';\
+  \ };\n    b.onmouseleave = () => { b.style.background = b.disabled ? '#242428' :\
+  \ '#2d2d2d'; };\n    b.onfocus = () => b.style.outline = '2px solid rgba(66,133,244,0.65)';\n\
+  \    b.onblur = () => b.style.outline = 'none';\n    return b;\n  }\n\n  const backBtn\
+  \ = makeBtn('&larr;', 'Back');\n  const forwardBtn = makeBtn('&rarr;', 'Forward');\n\
+  \  const reloadBtn = makeBtn('&#8635;', 'Reload');\n  header.append(backBtn, forwardBtn,\
+  \ reloadBtn);\n\n  const address = document.createElement('input');\n  address.type\
+  \ = 'text';\n  address.placeholder = 'Search Google or enter a URL';\n  address.autocomplete\
+  \ = 'off';\n  address.spellcheck = false;\n  address.style.cssText = \"flex:1;min-width:120px;padding:0\
+  \ 12px;height:34px;border-radius:5px;border:1px solid #3b3b44;background:#17171b;color:white;font-size:14px;font-weight:600;outline:none;\"\
+  ;\n  header.appendChild(address);\n\n  const goBtn = makeBtn('Go', 'Go');\n  goBtn.style.background\
+  \ = '#4285f4';\n  goBtn.style.borderColor = '#4285f4';\n  goBtn.onmouseleave = ()\
+  \ => { goBtn.style.background = '#4285f4'; };\n\n  const openBtn = makeBtn('&#8599;',\
+  \ 'Open in this device browser');\n  const modePill = document.createElement('span');\n\
+  \  modePill.textContent = 'iframe';\n  modePill.style.cssText = \"height:28px;padding:0\
+  \ 12px;border-radius:999px;border:1px solid rgba(66,133,244,.65);background:rgba(66,133,244,.12);color:#9ec1ff;font-size:12px;font-weight:800;display:inline-flex;align-items:center;letter-spacing:.02em;\"\
+  ;\n  header.append(goBtn, openBtn, modePill);\n\n  const frameWrap = document.createElement('div');\n\
+  \  frameWrap.style.cssText = \"position:relative;flex:1;min-height:0;background:white;overflow:hidden;\"\
+  ;\n  parent.appendChild(frameWrap);\n\n  const iframe = document.createElement('iframe');\n\
+  \  iframe.title = 'Embedded browser iframe';\n  iframe.style.cssText = \"position:absolute;inset:0;width:100%;height:100%;border:none;background:white;\"\
+  ;\n  iframe.referrerPolicy = \"strict-origin-when-cross-origin\";\n  frameWrap.appendChild(iframe);\n\
+  \n  const fallback = document.createElement('div');\n  fallback.style.cssText =\
+  \ \"position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:28px;box-sizing:border-box;background:linear-gradient(145deg,#f8fafc,#e8edf5);color:#1f2937;text-align:center;\"\
+  ;\n  frameWrap.appendChild(fallback);\n\n  const fallbackTitle = document.createElement('div');\n\
+  \  fallbackTitle.style.cssText = \"font-size:18px;font-weight:800;line-height:1.2;\"\
+  ;\n  const fallbackText = document.createElement('div');\n  fallbackText.style.cssText\
+  \ = \"max-width:520px;font-size:14px;line-height:1.45;color:#4b5563;\";\n  const\
+  \ fallbackUrl = document.createElement('div');\n  fallbackUrl.style.cssText = \"\
+  max-width:min(620px,90%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px\
+  \ ui-monospace,SFMono-Regular,Menlo,monospace;color:#64748b;background:rgba(255,255,255,.72);border:1px\
+  \ solid rgba(148,163,184,.34);border-radius:999px;padding:7px 11px;\";\n  const\
+  \ fallbackOpen = document.createElement('button');\n  fallbackOpen.type = 'button';\n\
+  \  fallbackOpen.textContent = 'Open in this device browser';\n  fallbackOpen.style.cssText\
+  \ = \"height:40px;padding:0 16px;border:0;border-radius:10px;background:#2563eb;color:white;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0\
+  \ 10px 24px rgba(37,99,235,.24);\";\n  fallbackOpen.onclick = () => {\n    const\
+  \ opened = window.open(currentUrl, '_blank', 'noopener,noreferrer');\n    setStatus(opened\
+  \ ? 'opened in this device browser' : 'popup blocked');\n  };\n  fallback.append(fallbackTitle,\
+  \ fallbackText, fallbackUrl, fallbackOpen);\n\n  const status = document.createElement('div');\n\
+  \  status.style.cssText = \"position:absolute;left:10px;bottom:10px;max-width:70%;padding:7px\
+  \ 10px;border-radius:999px;background:rgba(0,0,0,.48);color:white;font-size:12px;font-weight:700;pointer-events:none;opacity:0;transition:opacity\
+  \ .18s ease;\";\n  frameWrap.appendChild(status);\n\n  iframe.addEventListener('load',\
+  \ () => {\n    setStatus('');\n    try {\n      const href = iframe.contentWindow.location.href;\n\
+  \      if (href && href !== BLANK_URL) {\n        setAddress(href);\n        if\
+  \ (suppressNextLoadHistory) suppressNextLoadHistory = false;\n        else pushHistory(href);\n\
+  \      }\n    } catch (_) {\n      suppressNextLoadHistory = false;\n      if (iframe.src)\
+  \ setAddress(iframe.src);\n    }\n  });\n\n  address.addEventListener('keydown',\
+  \ (event) => {\n    if (event.key === 'Enter') {\n      event.preventDefault();\n\
+  \      loadIframe(address.value);\n    }\n  });\n\n  goBtn.onclick = () => loadIframe(address.value);\n\
+  \  openBtn.onclick = () => showExternalFallback(normalize(address.value || currentUrl),\
+  \ true);\n  reloadBtn.onclick = () => {\n    if (!currentUrl || currentUrl === BLANK_URL)\
+  \ return;\n    if (fallback.style.display !== 'none') {\n      showExternalFallback(currentUrl,\
+  \ false);\n      return;\n    }\n    try { iframe.contentWindow.location.reload();\
+  \ }\n    catch (_) { iframe.src = currentUrl; }\n  };\n  backBtn.onclick = () =>\
+  \ {\n    if (historyIndex <= 0) return;\n    historyIndex -= 1;\n    loadIframe(history[historyIndex],\
+  \ { skipHistory: true, autoOpen: false });\n  };\n  forwardBtn.onclick = () => {\n\
+  \    if (historyIndex >= history.length - 1) return;\n    historyIndex += 1;\n \
+  \   loadIframe(history[historyIndex], { skipHistory: true, autoOpen: false });\n\
+  \  };\n\n  loadIframe(DEFAULT_URL, { forceIframe: true });\n}"
+type: embedded-browser
+title: Embedded Browser
+position:
+  x: 13
+  y: 0
+size:
+  w: 13
+  h: 8

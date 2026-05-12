@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, Mic, Paperclip, X } from "lucide-react";
 import { studioApi } from "./api";
 import { studioFetch } from "./auth";
 import type { StudioAnnotation, Widget } from "./types";
@@ -54,10 +55,14 @@ const HISTORY_INDEX_KEY = "hermes-studio-chat-history-index";
 const HISTORY_MESSAGE_PREFIX = "hermes-studio-chat-history:";
 const HISTORY_LIMIT = 30;
 const CHAT_SIZE_KEY = "hermes-studio-chat-size";
-const CHAT_MIN_WIDTH = 320;
-const CHAT_MIN_HEIGHT = 280;
-const CHAT_DEFAULT_WIDTH = 380;
-const CHAT_DEFAULT_HEIGHT = 560;
+const COMPANION_POSITION_KEY = "hermes-studio-companion-position";
+const CHAT_MIN_WIDTH = 300;
+const CHAT_MIN_HEIGHT = 220;
+const CHAT_DEFAULT_WIDTH = 420;
+const CHAT_DEFAULT_HEIGHT = 340;
+const COMPANION_DEFAULT_POSITION = { x: 24, y: 86 };
+const GLANCE_FALLBACK =
+  "Ready to work on widgets, spaces, browser flows, and Studio itself.";
 
 interface ToolCall {
   id: string;
@@ -86,9 +91,107 @@ interface PanelSize {
   height: number;
 }
 
+interface CompanionPosition {
+  x: number;
+  y: number;
+}
+
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 interface PointerStart {
   x: number;
   y: number;
+}
+
+interface CompanionDrag {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  origin: CompanionPosition;
+  last: CompanionPosition;
+  moved: boolean;
+}
+
+type CompanionCssVars = React.CSSProperties & {
+  "--studio-companion-x": string;
+  "--studio-companion-y": string;
+};
+
+type ChatCssVars = React.CSSProperties & {
+  "--studio-chat-left": string;
+  "--studio-chat-bottom": string;
+  "--studio-chat-width": string;
+  "--studio-chat-height": string;
+};
+
+function getViewportSize(): ViewportSize {
+  if (typeof window === "undefined") return { width: 1440, height: 900 };
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+function sameCompanionPosition(a: CompanionPosition, b: CompanionPosition): boolean {
+  return a.x === b.x && a.y === b.y;
+}
+
+function clampCompanionPosition(
+  position: CompanionPosition,
+  viewport = getViewportSize(),
+): CompanionPosition {
+  const pad = 12;
+  const maxX = Math.max(pad, viewport.width - 154);
+  const maxY = Math.max(24, viewport.height - 156);
+  return {
+    x: Math.max(pad, Math.min(Math.round(position.x), maxX)),
+    y: Math.max(18, Math.min(Math.round(position.y), maxY)),
+  };
+}
+
+function loadCompanionPosition(): CompanionPosition {
+  try {
+    const raw = localStorage.getItem(COMPANION_POSITION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<CompanionPosition>;
+      if (typeof parsed.x === "number" && typeof parsed.y === "number") {
+        return clampCompanionPosition({ x: parsed.x, y: parsed.y });
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return clampCompanionPosition(COMPANION_DEFAULT_POSITION);
+}
+
+function saveCompanionPosition(position: CompanionPosition): void {
+  try {
+    localStorage.setItem(COMPANION_POSITION_KEY, JSON.stringify(clampCompanionPosition(position)));
+  } catch {
+    // ignore
+  }
+}
+
+function getChatPlacement(
+  companion: CompanionPosition,
+  extended: boolean,
+  savedSize: PanelSize,
+  viewport: ViewportSize,
+): { left: number; bottom: number; width: number; height: number } {
+  const pad = 12;
+  const compactWidth = Math.min(CHAT_DEFAULT_WIDTH, Math.max(CHAT_MIN_WIDTH, viewport.width - 168));
+  const compactHeight = Math.min(318, Math.max(CHAT_MIN_HEIGHT, viewport.height - 128));
+  const extendedWidth = Math.min(Math.max(savedSize.width, 500), Math.max(CHAT_MIN_WIDTH, viewport.width - 32), 560);
+  const extendedHeight = Math.min(Math.max(savedSize.height, 520), Math.max(CHAT_MIN_HEIGHT, viewport.height - 92), 640);
+  const width = extended ? extendedWidth : compactWidth;
+  const height = extended ? extendedHeight : compactHeight;
+
+  return {
+    left: Math.max(pad, Math.min(companion.x + 120, viewport.width - width - pad)),
+    bottom: Math.max(pad, Math.min(companion.y + 22, viewport.height - height - pad)),
+    width,
+    height,
+  };
 }
 
 function clampPanelSize(size: PanelSize, maxWidth = Number.POSITIVE_INFINITY, maxHeight = Number.POSITIVE_INFINITY): PanelSize {
@@ -218,6 +321,11 @@ function titleForMessages(messages: Message[]): string {
   if (!firstUser) return "New Studio chat";
   const oneLine = firstUser.text.replace(/\s+/g, " ").trim();
   return oneLine.length > 52 ? `${oneLine.slice(0, 52)}...` : oneLine;
+}
+
+function compactPreview(text: string, fallback = GLANCE_FALLBACK): string {
+  const normalized = text.replace(/\s+/g, " ").trim() || fallback;
+  return normalized.length > 156 ? `${normalized.slice(0, 153)}...` : normalized;
 }
 
 function isGratitudeOnly(text: string): boolean {
@@ -368,14 +476,22 @@ export function StudioChat({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Default-collapse on mobile so the user sees the canvas first; expanded on desktop.
-  const [collapsed, setCollapsed] = useState<boolean>(() => isMobileViewport());
+  // Default to the Space Agent / Codex Pets style glance shell so the canvas
+  // stays primary. Clicking the bubble opens the full working chat.
+  const [collapsed, setCollapsed] = useState<boolean>(() => true);
+  const [extended, setExtended] = useState<boolean>(() => false);
   const [panelSize, setPanelSize] = useState<PanelSize>(() => loadChatSize());
+  const [viewportSize, setViewportSize] = useState<ViewportSize>(() => getViewportSize());
+  const [companionPosition, setCompanionPosition] = useState<CompanionPosition>(() =>
+    loadCompanionPosition(),
+  );
   const abortRef = useRef<AbortController | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const companionDragRef = useRef<CompanionDrag | null>(null);
+  const suppressCompanionClickRef = useRef(false);
   const handledQueuedAnnotationRef = useRef<string | null>(null);
   const queuedAnnotationPromptRef = useRef<{ id: string; prompt: string } | null>(null);
   const annotationSummary = useMemo(() => {
@@ -393,6 +509,30 @@ export function StudioChat({
       "[User request]",
     ].join("\n");
   }, [annotations, widgets]);
+  const latestAssistantMessage = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "assistant"),
+    [messages],
+  );
+  const glanceText = useMemo(
+    () => compactPreview(latestAssistantMessage?.text || (streaming ? "Working..." : "")),
+    [latestAssistantMessage?.text, streaming],
+  );
+  const glanceTitle = streaming
+    ? "Hermes is working"
+    : latestAssistantMessage?.toolCalls.some((tool) => tool.state === "error")
+      ? "Hermes needs attention"
+      : "Hermes Studio";
+  const chatPlacement = useMemo(
+    () => getChatPlacement(companionPosition, extended, panelSize, viewportSize),
+    [companionPosition, extended, panelSize, viewportSize],
+  );
+  const companionStyle = useMemo<CompanionCssVars>(
+    () => ({
+      "--studio-companion-x": `${companionPosition.x}px`,
+      "--studio-companion-y": `${companionPosition.y}px`,
+    }),
+    [companionPosition],
+  );
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const next: Attachment[] = [];
@@ -578,9 +718,17 @@ export function StudioChat({
     const clampToViewport = () => {
       const maxWidth = Math.max(CHAT_MIN_WIDTH, window.innerWidth - 32);
       const maxHeight = Math.max(CHAT_MIN_HEIGHT, window.innerHeight - 32);
+      const viewport = getViewportSize();
+      setViewportSize(viewport);
       setPanelSize((prev) => {
         const next = clampPanelSize(prev, maxWidth, maxHeight);
         if (next.width === prev.width && next.height === prev.height) return prev;
+        return next;
+      });
+      setCompanionPosition((prev) => {
+        const next = clampCompanionPosition(prev, viewport);
+        if (sameCompanionPosition(prev, next)) return prev;
+        saveCompanionPosition(next);
         return next;
       });
     };
@@ -707,7 +855,7 @@ export function StudioChat({
       outgoing = promptText;
       echoText = text;
     } else {
-      let textPart = promptText;
+      const textPart = promptText;
       const fileBlocks: string[] = [];
       const imageParts: ContentPart[] = [];
       const labels: string[] = [];
@@ -849,27 +997,101 @@ export function StudioChat({
     abortRef.current?.abort();
   }, []);
 
-  const onHeaderClick = useCallback(() => {
-    setCollapsed((c) => {
-      const next = !c;
-      // When expanding via tap, focus the input so the keyboard opens on mobile.
-      if (!next && isMobileViewport()) {
-        setTimeout(() => inputRef.current?.focus(), 220);
-      }
-      return next;
-    });
+  const openCompactChat = useCallback(() => {
+    setCollapsed(false);
+    setExtended(false);
+    setHistoryOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 180);
   }, []);
 
-  const expandFromFab = useCallback(() => {
-    setCollapsed(false);
-    setTimeout(() => inputRef.current?.focus(), 220);
+  const minimizeCompanion = useCallback(() => {
+    setCollapsed(true);
+    setExtended(false);
+    setHistoryOpen(false);
   }, []);
+
+  const toggleExtended = useCallback(() => {
+    if (collapsed) {
+      openCompactChat();
+      return;
+    }
+    setExtended((value) => !value);
+    setTimeout(() => inputRef.current?.focus(), 120);
+  }, [collapsed, openCompactChat]);
+
+  const onHeaderClick = useCallback(() => {
+    if (!isMobileViewport()) return;
+    toggleExtended();
+  }, [toggleExtended]);
+
+  const onCompanionPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      companionDragRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        origin: companionPosition,
+        last: companionPosition,
+        moved: false,
+      };
+      suppressCompanionClickRef.current = false;
+    },
+    [companionPosition],
+  );
+
+  const onCompanionPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      const drag = companionDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+      e.preventDefault();
+      const next = clampCompanionPosition(
+        {
+          x: drag.origin.x + dx,
+          y: drag.origin.y - dy,
+        },
+        viewportSize,
+      );
+      drag.moved = true;
+      drag.last = next;
+      suppressCompanionClickRef.current = true;
+      setCompanionPosition(next);
+    },
+    [viewportSize],
+  );
+
+  const onCompanionPointerEnd = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = companionDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    companionDragRef.current = null;
+    if (drag.moved) saveCompanionPosition(drag.last);
+    window.setTimeout(() => {
+      suppressCompanionClickRef.current = false;
+    }, 0);
+  }, []);
+
+  const onPetClick = useCallback(() => {
+    if (suppressCompanionClickRef.current) return;
+    if (collapsed) {
+      openCompactChat();
+      return;
+    }
+    inputRef.current?.focus();
+  }, [collapsed, openCompactChat]);
 
   const beginResize = useCallback(
     (start: PointerStart) => {
       const panel = panelRef.current;
       if (!panel) return null;
-      const startSize = clampPanelSize(panelSize);
+      const rect = panel.getBoundingClientRect();
+      const startSize = clampPanelSize({ width: rect.width, height: rect.height });
 
       const onMove = (clientX: number, clientY: number) => {
         const maxWidth = Math.max(CHAT_MIN_WIDTH, window.innerWidth - 32);
@@ -905,7 +1127,7 @@ export function StudioChat({
 
       return { onMove, onEnd };
     },
-    [panelSize],
+    [],
   );
 
   const onResizeMouseDown = useCallback(
@@ -997,12 +1219,68 @@ export function StudioChat({
   return (
     <>
       <div
+        className={`studio-agent-pet-shell ${collapsed ? "is-glance" : "is-chat"} ${
+          extended ? "is-extended" : "is-compact"
+        }`}
+        style={companionStyle}
+      >
+        {collapsed && (
+          <button
+            type="button"
+            className="studio-agent-glance"
+            aria-label="Open Hermes chat"
+            onClick={openCompactChat}
+          >
+            <span className="studio-agent-glance-title">
+              {glanceTitle}
+              {streaming && <span className="studio-agent-glance-spinner" aria-hidden />}
+            </span>
+            <span className="studio-agent-glance-text">{glanceText}</span>
+          </button>
+        )}
+        <div className="studio-agent-pet-row">
+          <button
+            type="button"
+            className="studio-agent-pet"
+            aria-label={collapsed ? "Open Hermes chat" : "Focus Hermes chat"}
+            title={collapsed ? "Open Hermes chat" : "Focus Hermes chat"}
+            draggable={false}
+            onPointerDown={onCompanionPointerDown}
+            onPointerMove={onCompanionPointerMove}
+            onPointerUp={onCompanionPointerEnd}
+            onPointerCancel={onCompanionPointerEnd}
+            onClick={onPetClick}
+          >
+            <span className="studio-agent-pet-sprite" aria-hidden />
+          </button>
+          <button
+            type="button"
+            className="studio-agent-expand"
+            aria-label={
+              collapsed ? "Open Hermes chat" : extended ? "Compact Hermes chat" : "Extend Hermes chat"
+            }
+            title={collapsed ? "Open Hermes chat" : extended ? "Compact Hermes chat" : "Extend Hermes chat"}
+            onClick={toggleExtended}
+          >
+            {extended ? (
+              <ChevronUp aria-hidden size={18} strokeWidth={2.2} />
+            ) : (
+              <ChevronDown aria-hidden size={18} strokeWidth={2.2} />
+            )}
+          </button>
+        </div>
+        </div>
+      <div
         ref={panelRef}
-        className={`studio-chat studio-glass-strong ${collapsed ? "is-collapsed" : ""}`}
+        className={`studio-chat studio-glass-strong ${collapsed ? "is-collapsed" : ""} ${
+          extended ? "is-extended" : "is-compact"
+        }`}
         style={{
-          ["--studio-chat-width" as any]: `${panelSize.width}px`,
-          ["--studio-chat-height" as any]: `${panelSize.height}px`,
-        } as React.CSSProperties}
+          "--studio-chat-left": `${chatPlacement.left}px`,
+          "--studio-chat-bottom": `${chatPlacement.bottom}px`,
+          "--studio-chat-width": `${chatPlacement.width}px`,
+          "--studio-chat-height": `${chatPlacement.height}px`,
+        } as ChatCssVars}
       >
         <div className="studio-chat-header" onClick={onHeaderClick}>
           <span
@@ -1048,13 +1326,14 @@ export function StudioChat({
           <button
             type="button"
             className="studio-chat-toggle"
-            aria-label={collapsed ? "Expand chat" : "Collapse chat"}
+            aria-label="Minimize Hermes chat"
+            title="Minimize Hermes chat"
             onClick={(e) => {
               e.stopPropagation();
-              setCollapsed((c) => !c);
+              minimizeCompanion();
             }}
           >
-            {collapsed ? "▴" : "▾"}
+            <X aria-hidden size={16} strokeWidth={2.2} />
           </button>
         </div>
 
@@ -1168,7 +1447,7 @@ export function StudioChat({
               onClick={() => fileInputRef.current?.click()}
               disabled={streaming}
             >
-              📎
+              <Paperclip aria-hidden size={18} strokeWidth={1.9} />
             </button>
             {speechSupported && (
               <button
@@ -1188,7 +1467,7 @@ export function StudioChat({
                     : undefined
                 }
               >
-                {recording ? "●" : "🎤"}
+                <Mic aria-hidden size={17} strokeWidth={recording ? 2.4 : 1.9} />
               </button>
             )}
             <textarea
@@ -1206,7 +1485,7 @@ export function StudioChat({
               onKeyDown={onKey}
               onPaste={onPaste}
               disabled={streaming}
-              rows={2}
+              rows={extended ? 4 : 2}
               style={{ resize: "none", flex: 1 }}
             />
           </div>
@@ -1224,7 +1503,7 @@ export function StudioChat({
         type="button"
         className="studio-chat-fab"
         aria-label="Open chat"
-        onClick={expandFromFab}
+        onClick={openCompactChat}
       >
         <span style={{ fontSize: "1.2rem", lineHeight: 1 }}>💬</span>
       </button>
@@ -1247,8 +1526,10 @@ function ChatBubble({ message }: { message: Message }) {
         style={{
           maxWidth: "85%",
           padding: "8px 12px",
-          borderRadius: 10,
-          background: isUser ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(17, 24, 39, 0.08)",
+          borderRadius: 14,
+          background: isUser ? "rgba(58, 126, 255, 0.14)" : "rgba(255,255,255,0.58)",
+          boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)",
           color: "var(--studio-text)",
           fontSize: "0.85rem",
           lineHeight: 1.4,

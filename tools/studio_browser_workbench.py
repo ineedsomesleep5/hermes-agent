@@ -1,8 +1,7 @@
-"""First-class embedded browser workbench for Hermes Studio.
+"""First-class iframe browser workbench for Hermes Studio.
 
-This installs the lightweight screenshot-driven browser surface as a Studio
-widget so agents can treat the browser as a primary workflow instead of a
-one-off utility.
+This installs the lightweight iframe-first browser surface as a Studio widget.
+Sites that block iframe embedding open in the user's real device browser.
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ def studio_install_embedded_browser(args: Dict[str, Any], **_) -> str:
                 "title": rec["title"],
                 "position": rec["position"],
                 "size": rec["size"],
-                "description": "Embedded browser with iframe + snapshot modes; snapshot streams headless Chrome over WebSocket with stealth (works on X, Meta, LinkedIn).",
+                "description": "Iframe-first embedded browser. Frame-blocked or login-heavy sites open in the user's real device browser.",
             }
         )
     except ValueError as exc:
@@ -105,5 +104,5 @@ registry.register(
     },
     handler=lambda args, **kw: studio_install_embedded_browser(args, **kw),
     check_fn=lambda: True,
-    description="Install the embedded browser workbench widget into a Studio space.",
+    description="Install the iframe-first embedded browser workbench widget into a Studio space.",
 )

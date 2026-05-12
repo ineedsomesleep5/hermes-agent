@@ -8,6 +8,7 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
         access_token = "pool-token"
         source = "manual"
         base_url = "https://chatgpt.com/backend-api/codex"
+        label = "default"
 
     class _Pool:
         def has_credentials(self):
@@ -25,6 +26,45 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["api_key"] == "pool-token"
     assert resolved["credential_pool"] is not None
     assert resolved["source"] == "manual"
+
+
+def test_resolve_runtime_provider_credential_label_can_be_transient(monkeypatch):
+    class _Entry:
+        def __init__(self, label, token):
+            self.label = label
+            self.access_token = token
+            self.source = "manual:device_code"
+            self.base_url = "https://chatgpt.com/backend-api/codex"
+
+    selected = _Entry("Caleb's GPT 5.5", "caleb-token")
+    nelly = _Entry("Nelly's GPT 5.4 mini", "nelly-token")
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return selected
+
+        def promote_target(self, target):
+            raise AssertionError("transient cron routing must not promote globally")
+
+        def resolve_target(self, target):
+            assert target == "Nelly's GPT 5.4 mini"
+            return 2, nelly, None
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openai-codex",
+        target_model="gpt-5.4-mini",
+        credential_label="Nelly's GPT 5.4 mini",
+        promote_credential=False,
+    )
+
+    assert resolved["api_key"] == "nelly-token"
+    assert resolved["credential_label"] == "Nelly's GPT 5.4 mini"
 
 
 def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkeypatch):

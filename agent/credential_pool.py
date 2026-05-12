@@ -931,6 +931,21 @@ class CredentialPool:
         available = self._available_entries()
         return available[0] if available else None
 
+    def promote_target(self, target: Any) -> Optional[PooledCredential]:
+        """Move the matched credential to the front of the pool and persist it."""
+        with self._lock:
+            _, entry, _ = self.resolve_target(target)
+            if entry is None:
+                return None
+            if self._entries and self._entries[0].id == entry.id:
+                self._current_id = entry.id
+                return entry
+            ordered = [entry, *[candidate for candidate in self._entries if candidate.id != entry.id]]
+            self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(ordered)]
+            self._persist()
+            self._current_id = entry.id
+            return self.current() or entry
+
     def mark_exhausted_and_rotate(
         self,
         *,

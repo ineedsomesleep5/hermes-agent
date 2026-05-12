@@ -93,6 +93,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
+    "TINYFISH_API_KEY",
 })
 import yaml
 
@@ -1772,6 +1773,14 @@ OPTIONAL_ENV_VARS = {
         "description": "Parallel API key for AI-native web search and extract",
         "prompt": "Parallel API key",
         "url": "https://parallel.ai/",
+        "tools": ["web_search", "web_extract"],
+        "password": True,
+        "category": "tool",
+    },
+    "TINYFISH_API_KEY": {
+        "description": "TinyFish API key for free web search and fetch",
+        "prompt": "TinyFish API key",
+        "url": "https://tinyfish.ai/",
         "tools": ["web_search", "web_extract"],
         "password": True,
         "category": "tool",

@@ -24,14 +24,17 @@ def browser_modules(monkeypatch, tmp_path):
     yield sw_mod, seb_mod, sbw_mod
 
 
-def test_embedded_browser_renderer_includes_tab_and_record_controls(browser_modules):
+def test_embedded_browser_renderer_is_iframe_first(browser_modules):
     _, seb, _ = browser_modules
     renderer = seb.EMBEDDED_BROWSER_RENDERER
-    assert "/api/studio/browser/state" in renderer
-    assert "/api/studio/browser/tab/new" in renderer
-    assert "/api/studio/browser/tab/select" in renderer
-    assert "/api/studio/browser/record/start" in renderer
-    assert "Recording" in renderer
+    assert "const GOOGLE_HOME_URL" in renderer
+    assert "https://google.com/" in renderer
+    assert "iframe.sandbox" not in renderer
+    assert "studio://google-home" not in renderer
+    assert "const EXTERNAL_HOSTS" in renderer
+    assert "showExternalFallback" in renderer
+    assert "window.open(url, '_blank'" in renderer
+    assert "/api/studio/browser/" not in renderer
 
 
 def test_studio_install_embedded_browser_registers_tool(browser_modules):
@@ -51,8 +54,13 @@ def test_studio_install_embedded_browser_creates_widget(browser_modules):
     widget = sw.get_widget("default", "embedded-browser")
     assert widget is not None
     assert widget["title"] == "Embedded Browser"
-    assert "/api/studio/browser/tab/new" in widget["renderer"]
-    assert "/api/studio/browser/state" in widget["renderer"]
+    assert "const GOOGLE_HOME_URL" in widget["renderer"]
+    assert "https://google.com/" in widget["renderer"]
+    assert "iframe.sandbox" not in widget["renderer"]
+    assert "studio://google-home" not in widget["renderer"]
+    assert "showExternalFallback" in widget["renderer"]
+    assert "window.open(url, '_blank'" in widget["renderer"]
+    assert "/api/studio/browser/" not in widget["renderer"]
 
 
 def test_studio_install_embedded_browser_allows_custom_layout(browser_modules):

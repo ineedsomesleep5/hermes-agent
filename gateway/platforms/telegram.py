@@ -85,6 +85,7 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
+from hermes_cli.model_switch import _format_provider_name
 
 
 def check_telegram_requirements() -> bool:
@@ -1623,7 +1624,7 @@ class TelegramAdapter(BasePlatformAdapter):
             buttons: list = []
             for p in providers:
                 count = p.get("total_models", len(p.get("models", [])))
-                label = f"{p['name']} ({count})"
+                label = f"{_format_provider_name(p['name'], p['slug'], show_all_labels=True)} ({count})"
                 if p.get("is_current"):
                     label = f"✓ {label}"
                 # Compact callback data: mp:<slug>  (max 64 bytes)
@@ -1635,7 +1636,7 @@ class TelegramAdapter(BasePlatformAdapter):
             rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
             keyboard = InlineKeyboardMarkup(rows)
 
-            provider_label = get_label(current_provider)
+            provider_label = _format_provider_name(get_label(current_provider), current_provider, show_all_labels=True)
             text = (
                 f"⚙ *Model Configuration*\n\n"
                 f"Current model: `{current_model or 'unknown'}`\n"
@@ -1745,7 +1746,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             keyboard, page_info = self._build_model_keyboard(models, 0)
 
-            pname = provider.get("name", provider_slug)
+            pname = _format_provider_name(provider.get("name", provider_slug), provider_slug, show_all_labels=True)
             total = provider.get("total_models", len(models))
             shown = len(models)
             extra = f"\n_{total - shown} more available — type `/model <name>` directly_" if total > shown else ""
@@ -1774,8 +1775,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
             keyboard, page_info = self._build_model_keyboard(models, page)
 
-            pname = state.get("selected_provider_name", "")
             provider_slug = state.get("selected_provider", "")
+            pname = _format_provider_name(state.get("selected_provider_name", ""), provider_slug, show_all_labels=True)
             provider = next(
                 (p for p in state["providers"] if p["slug"] == provider_slug),
                 None,

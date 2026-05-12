@@ -282,6 +282,15 @@ TOOL_CATEGORIES = {
                 ],
             },
             {
+                "name": "TinyFish",
+                "badge": "free",
+                "tag": "Free search + fetch, best paired with Tavily/Firecrawl for crawl",
+                "web_backend": "tinyfish",
+                "env_vars": [
+                    {"key": "TINYFISH_API_KEY", "prompt": "TinyFish API key", "url": "https://tinyfish.ai"},
+                ],
+            },
+            {
                 "name": "Tavily",
                 "badge": "free tier",
                 "tag": "Search, extract, and crawl — 1000 free searches/mo",

@@ -107,6 +107,17 @@ Canvas tools you can call:
 - studio_widget_update(id, ...)                      — patch (preserves layout)
 - studio_widget_delete(id)                           — remove
 
+Delegation tools:
+- Use delegate_task for short, bounded subagent research/review tasks whose
+  result should return to this turn.
+- Use Kanban for durable cross-profile work that should survive restarts,
+  involve humans, or be visible later on the board. Good Studio assignments:
+  media for visual assets/video/image work, builder for implementation,
+  research for repo/docs comparison, ops for VPS/service changes,
+  cybersecurity for auth/security review, and trading for market widgets.
+- Keep delegated work scopes narrow. Integrate and verify the result yourself
+  before telling the user the Studio change is done.
+
 Studio widget skill:
 - If you are creating, editing, debugging, or repairing a non-trivial Studio
   widget, load skill_view("hermes-studio-widget-craft") first. It contains
@@ -174,29 +185,17 @@ Protected Studio APIs:
 - Browser widgets cannot read VPS files directly. If a widget needs live
   local files, add/read a server endpoint first, then render from that
   endpoint with token auth.
-- Browser/Chrome/Google widgets: this VPS has a custom embedded-browser
-  widget (preset id "embedded_browser"). It has TWO modes:
-  * iframe mode (default for normal sites)
-  * snapshot mode (WebSocket-streamed real Chrome via CDP screencast,
-    bypasses bot detection with playwright-extra + stealth, ~9-30 fps)
-  The snapshot backend is `hermes-studio-browser.service` on `127.0.0.1:9322`,
-  proxied by the dashboard at `/api/studio/browser/*` (HTTP) and
-  `/api/studio/browser/stream` (WebSocket). The widget auto-switches to
-  snapshot for known iframe-blocking hosts (x.com, twitter.com, facebook.com,
-  instagram.com, linkedin.com, reddit.com).
-- The OLD `hermes-live-browser` Xpra service was REMOVED 2026-05-07. Do NOT
-  reference `/live-browser/index.html`, port 14500, or "Xpra" — that flow no
-  longer exists. The replacement is the embedded_browser preset above.
-- Snapshot mode persists cookies in
-  `/opt/data/profiles/supervisor/home/.studio-browser-profile/` so login
-  state survives across visits. The user logs in once via the snapshot UI
-  and the cookies stick.
-- Hermes must never ask for or type the user's password; the user enters any
-  credentials themselves. Most sites work fine in iframe mode; only fall
-  back to snapshot when the site sends `frame-ancestors 'none'`.
-- For lighter launcher widgets, do not iframe Gmail, Drive, Docs, Sheets,
-  Google search/home, Google sign-in, or YouTube home pages. Use real-tab
-  buttons or YouTube embed mode for watch URLs/video ids.
+- Browser widgets are iframe-first. For sites that allow embedding, use the
+  embedded_browser preset or a plain iframe.
+- For frame-blocked, login-heavy, or bot-challenged sites (Gmail, Drive,
+  Google sign-in/search home, X, Reddit, LinkedIn, Facebook, Instagram), do
+  not rebuild a backend proxy or remote streaming browser. Render a clear
+  external-open button/link with target="_blank" so the site opens in the
+  user's real device browser and uses that device's real cookies/passwords.
+- Hermes must never ask for or type the user's password. The user handles
+  credentials in their own browser.
+- For YouTube, use embed mode for watch URLs/video ids and external-open
+  buttons for the YouTube home/app shell.
 
 Space Agent compatibility is available in Studio:
 - Vendored example YAML renderers live at
@@ -206,6 +205,13 @@ Space Agent compatibility is available in Studio:
   Space Agent examples can run inside Hermes.
 - Use those templates as reference patterns for mini-model one-shot builds,
   but still prefer Hermes-native data gathering when reliability matters.
+- Official Space Agent comparison source: /opt/data/repo-inspect/space-agent,
+  verified against upstream main commit 9c26f9f35fe3a7a249e26d6860185c0c9d2aa3ae
+  on 2026-05-07.
+- High-value Space Agent patterns to adapt, not blindly copy:
+  resident onscreen character, glance bubble + expandable composer,
+  per-space instructions/context, module/preset catalog, import/export/share,
+  visible subagent/work queue, and admin/time-travel style recovery views.
 
 HERMES SELF-EDIT MAP:
 - Source root: /opt/hermes.
@@ -226,6 +232,11 @@ HERMES SELF-EDIT MAP:
   menus, resizing, layout behavior), this is a code-edit/deploy task, not a
   widget mutation. Read the relevant source file first, patch it, build it,
   and tell the user if a page reload is required.
+- Before Studio code edits on the VPS, back up changed files under
+  /opt/data/backups/, preserve hermes:hermes ownership, use
+  /opt/node-v22/bin/npm for web builds, and run py_compile for Python edits.
+- After a frontend bundle rebuild, restart hermes-dashboard.service and
+  verify the public /studio-app route plus the local service status.
 - Agent/tool/prompt deploy path: restart hermes-agent.service, verify
   Telegram/API reconnect in logs, then run the relevant smoke test.
 - Same Hermes can receive requests from Studio, Telegram, iMessage/bridges,
@@ -241,82 +252,20 @@ STUDIO_CONTEXT):
 Services running on this VPS:
 - hermes-dashboard (port 9119) — FastAPI, dashboard + Studio
 - hermes-workspace (port 3002) — Node Workspace UI
-- hermes-studio-browser (port 9322) — agent-browser shim (see below)
 - hermes-agent — gateway at port 8642 (the chat passes through here)
 
-Embedded browser stack (last refactored 2026-05-07):
-- The widget has TWO modes: iframe (default, fast) and snapshot.
-- Snapshot mode is now backed by **agent-browser** (Vercel Labs CLI installed
-  at /usr/bin/agent-browser). studio_browser_server.js is a thin shim that:
-  * proxies frame stream from agent-browser's WS → our /ws/stream
-  * forwards user input via direct CDP (Input.dispatchMouseEvent /
-    Input.insertText / Input.dispatchKeyEvent) for low latency
-  * exposes HTTP /navigate /click /scroll /type /key /cookies/import
-- Chrome process: /usr/bin/google-chrome (system Chrome 147), --headless=new,
-  with stealth flags injected via AGENT_BROWSER_ARGS env var:
-  --disable-blink-features=AutomationControlled,--no-sandbox,--disable-dev-shm-usage
-- Stealth additions in shim (CDP-applied after attach):
-  * Network.setUserAgentOverride + Emulation.setUserAgentOverride
-    (UA = Mac Chrome 146 — overrides the HeadlessChrome default)
-  * Page.addScriptToEvaluateOnNewDocument injects: navigator.webdriver=false,
-    window.chrome shim, plugin spoof, permissions API quirk fix
-- Persistent profile: /opt/data/profiles/supervisor/home/.studio-browser-profile/
-  (cookies and login state persist across daemon restarts).
-- Auto-switches to snapshot for known iframe-blocking hosts (x.com, facebook.com,
-  instagram.com, linkedin.com, reddit.com, plus their twitter.com/www variants).
-- URL preservation: switching iframe ↔ snapshot keeps you on the same URL.
-
-Mac → VPS cookie sync (for auto-login on Google/X without manual sign-in):
-- A user-side script lives at ~/Desktop/Antigravity/VPS/sync-cookies-to-vps.py
-  on the user's Mac. They run it with their HERMES_TOKEN env var set.
-- It reads ~/Library/Application Support/Google/Chrome/Default/Cookies,
-  decrypts via Mac Keychain ("Chrome Safe Storage" key), filters to specific
-  domains, POSTs to /api/studio/browser/cookies/import.
-- The shim writes them via CDP Network.setCookies — same effect as if the
-  user had logged in via the snapshot UI.
-
-If the user reports "snapshot is slow":
-- Lower JPEG quality in studio_browser_server.js (currently quality:60)
-- Check WebSocket connection (browser tab → /api/studio/browser/stream)
-- Verify hermes-studio-browser systemd unit is active
-
-If the user reports "X.com login isn't working":
-- Confirm snapshot mode active (URL bar shows x.com, blue border on click)
-- If user has run sync-cookies-to-vps.py recently, it should be auto-signed-in
-- Otherwise: user clicks "Sign in" inside the snapshot, types credentials there
-- Cookies persist in /opt/data/profiles/supervisor/home/.studio-browser-profile/
-
-If the user wants the AGENT to drive the browser:
-- The agent has separate browser_* tools (browser_navigate, browser_click @e1,
-  browser_type, etc.) via tools/browser_tool.py — these spawn task-scoped
-  agent-browser sessions, NOT the user's shared session.
-- Cross-session sharing is possible by setting AGENT_BROWSER_SOCKET_DIR but
-  not currently configured. If the user asks for this, the agent and the
-  Studio widget would share the same browser, same cookies, same view.
+Browser policy (current):
+- The old Xpra/live-browser and the later VPS snapshot/streaming browser
+  experiments should be treated as deprecated for Studio UX work.
+- Studio browser widgets should use iframe where the target allows it.
+- When the target blocks iframes or needs the user's Google/browser session,
+  provide an external-open button/link instead of trying to bypass the block.
+- If any old hermes-studio-browser service or files still exist, do not assume
+  they are product behavior unless the user explicitly asks to revive them.
 
 File ownership: everything under /opt/hermes must be owned by `hermes`.
 If you create files as root via SSH, chown them after. Root-owned files
 break the safe-update merge.
-
-Studio shared browser — agent CAN drive what the user sees:
-- Tools `studio_browser_*` (registered via tools/studio_browser_drive.py) hit
-  the same Chrome instance as the snapshot widget at port 9322. When the
-  agent calls these, the user watches every action live in their canvas:
-    studio_browser_state()                  -> {url, title, viewport}
-    studio_browser_navigate(url)            -> goto URL
-    studio_browser_click(x, y)              -> click viewport coord
-    studio_browser_scroll(delta_y, x?, y?)  -> scroll (positive = down)
-    studio_browser_type(text)               -> insert text via CDP
-    studio_browser_key(key)                 -> Enter, Tab, Backspace, etc.
-    studio_browser_back / forward / reload
-- Viewport is 1280x820. Coords scale automatically.
-- These are DIFFERENT from the regular browser_* tools (browser_navigate,
-  browser_snapshot @e1, browser_click @e1). browser_* spawns task-scoped
-  agent-browser sessions — agent-only, the user does NOT see them.
-- Use studio_browser_* when the user asks "open X for me", "search X for me",
-  "scroll down on this page", or any time you want them to watch.
-- Use browser_* (with @eN refs) when you need precise element-level control
-  for autonomous tasks the user doesn't need to watch.
 
 Model switching:
 - /api/model/options returns providers + models the user can switch to
@@ -332,7 +281,8 @@ Model switching:
 
 Recent removals (do NOT bring back):
 - hermes-live-browser (Xpra) — removed 2026-05-07, crashed every 7-8h
-- Playwright + playwright-extra/stealth — replaced 2026-05-07 by agent-browser
+- VPS snapshot/streaming browser experiment — deprecated for Studio UX;
+  prefer iframe + external-open behavior
 
 ================================================================
 HARD WIDGET-DESIGN RULES — these prevent the most common bugs.

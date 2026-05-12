@@ -184,6 +184,7 @@ def _resolve_runtime_from_pool_entry(
     model_cfg: Optional[Dict[str, Any]] = None,
     pool: Optional[CredentialPool] = None,
     target_model: Optional[str] = None,
+    credential_label: str = "",
 ) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
     # When the caller is resolving for a specific target model (e.g. a /model
@@ -292,6 +293,7 @@ def _resolve_runtime_from_pool_entry(
         "api_key": api_key,
         "source": getattr(entry, "source", "pool"),
         "credential_pool": pool,
+        "credential_label": getattr(entry, "label", "") or "",
         "requested_provider": requested_provider,
     }
 
@@ -341,6 +343,7 @@ def _try_resolve_from_custom_pool(
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
+            "credential_label": getattr(entry, "label", "") or "",
         }
     except Exception:
         return None
@@ -895,6 +898,8 @@ def resolve_runtime_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    credential_label: str = "",
+    promote_credential: bool = True,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -993,7 +998,18 @@ def resolve_runtime_provider(
     except Exception:
         pool = None
     if pool and pool.has_credentials():
-        entry = pool.select()
+        requested_label = (credential_label or str(model_cfg.get("credential_label") or "")).strip()
+        entry = None
+        if requested_label and provider == "openai-codex":
+            try:
+                if promote_credential:
+                    entry = pool.promote_target(requested_label)
+                else:
+                    _, entry, _ = pool.resolve_target(requested_label)
+            except Exception:
+                entry = None
+        if entry is None:
+            entry = pool.select()
         pool_api_key = ""
         if entry is not None:
             pool_api_key = (
@@ -1058,6 +1074,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
+                "credential_label": creds.get("credential_label", "") or creds.get("label", "") or "",
                 "requested_provider": requested_provider,
             }
         except AuthError:

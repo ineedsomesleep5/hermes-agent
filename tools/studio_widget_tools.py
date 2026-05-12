@@ -333,17 +333,52 @@ registry.register(
     description=READ_SCHEMA["description"],
 )
 
-@registry.register(
-    "Update the Studio canvas background to an image, video, or color.",
-    space_id="Space ID (usually 'default')",
-    background_url="URL of the video/image, or a CSS color string (#000000, rgb(0,0,0)).",
-    background_type="Optional. Set to 'video', 'image', or 'color'. Auto-detects if omitted.",
-)
-def studio_space_update(
-    space_id: str, background_url: str, background_type: Optional[str] = None
-) -> str:
+SPACE_UPDATE_SCHEMA = {
+    "name": "studio_space_update",
+    "description": "Update the Studio canvas background to an image, video, or color.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "space_id": {
+                "type": "string",
+                "description": "Space ID (usually 'default').",
+                "default": "default",
+            },
+            "background_url": {
+                "type": "string",
+                "description": "URL of the video/image, or a CSS color string (#000000, rgb(0,0,0)).",
+            },
+            "background_type": {
+                "type": "string",
+                "description": "Optional. Set to 'video', 'image', or 'color'. Auto-detects if omitted.",
+            },
+        },
+        "required": ["background_url"],
+        "additionalProperties": False,
+    },
+}
+
+
+def studio_space_update(args: Dict[str, Any], **_) -> str:
     try:
+        space_id = str(args.get("space_id") or "default")
+        background_url = str(args.get("background_url") or "")
+        if not background_url:
+            return _err("background_url is required")
+        background_type = args.get("background_type")
+        if background_type is not None:
+            background_type = str(background_type)
         s = studio_widgets.update_space_background(space_id, background_url, background_type)
         return _ok({"id": s["id"], "background_url": s.get("background_url")})
     except ValueError as e:
-        return _error(str(e))
+        return _err(str(e))
+
+
+registry.register(
+    name="studio_space_update",
+    toolset="studio",
+    schema=SPACE_UPDATE_SCHEMA,
+    handler=lambda args, **kw: studio_space_update(args, **kw),
+    check_fn=check_studio_requirements,
+    description=SPACE_UPDATE_SCHEMA["description"],
+)

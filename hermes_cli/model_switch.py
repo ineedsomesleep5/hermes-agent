@@ -35,6 +35,7 @@ from hermes_cli.providers import (
 from hermes_cli.model_normalize import (
     normalize_model_for_provider,
 )
+from agent.credential_pool import load_pool
 from agent.models_dev import (
     ModelCapabilities,
     ModelInfo,
@@ -56,6 +57,61 @@ _HERMES_MODEL_WARNING = (
     "required for agent workflows. Consider using an agentic model instead "
     "(Claude, GPT, Gemini, DeepSeek, etc.)."
 )
+
+
+def _credential_pool_entries(provider: str) -> list[tuple[str, str]]:
+    """Return provider credential entries as ``(id, label)`` tuples."""
+    try:
+        pool = load_pool(provider)
+    except Exception:
+        return []
+    try:
+        if not pool.has_credentials():
+            return []
+        rows: list[tuple[str, str]] = []
+        for entry in pool.entries():
+            label = str(getattr(entry, "label", "") or "").strip()
+            entry_id = str(getattr(entry, "id", "") or "").strip()
+            if label:
+                rows.append((entry_id, label))
+        return rows
+    except Exception:
+        return []
+
+
+def _credential_pool_labels(provider: str) -> tuple[str, list[str]]:
+    """Return (active_label, all_labels) for a provider's credential pool."""
+    try:
+        pool = load_pool(provider)
+    except Exception:
+        return "", []
+    try:
+        if not pool.has_credentials():
+            return "", []
+        entries = [(eid, label) for eid, label in _credential_pool_entries(provider) if label]
+        if not entries:
+            return "", []
+        current = pool.peek()
+        active_label = (getattr(current, "label", "") or entries[0][1] or "").strip()
+        labels: list[str] = []
+        if active_label:
+            labels.append(active_label)
+        for _, label in entries:
+            if label and label not in labels:
+                labels.append(label)
+        return active_label, labels
+    except Exception:
+        return "", []
+
+
+def _format_provider_name(name: str, provider: str, *, show_all_labels: bool = False) -> str:
+    active_label, labels = _credential_pool_labels(provider)
+    if not labels:
+        return name
+    suffix_labels = labels if (show_all_labels or len(labels) > 1) else [active_label or labels[0]]
+    suffix = ", ".join(suffix_labels)
+    return f"{name} — {suffix}" if suffix else name
+
 
 # Match only the real Nous Research Hermes 3 / Hermes 4 chat families.
 # The previous substring check (`"hermes" in name.lower()`) false-positived on
@@ -273,6 +329,7 @@ class ModelSwitchResult:
     error_message: str = ""
     warning_message: str = ""
     provider_label: str = ""
+    credential_label: str = ""
     resolved_via_alias: str = ""
     capabilities: Optional[ModelCapabilities] = None
     model_info: Optional[ModelInfo] = None
@@ -671,6 +728,15 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    credential_target = ""
+
+    # Picker rows may encode a pooled credential selection as
+    # ``provider#entry_id`` so users can choose a specific account from one
+    # provider pool (e.g. multiple Codex subscriptions).
+    if explicit_provider and "#" in explicit_provider:
+        explicit_provider, credential_target = explicit_provider.split("#", 1)
+        explicit_provider = explicit_provider.strip()
+        credential_target = credential_target.strip()
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -845,6 +911,7 @@ def switch_model(
 
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
+    selected_credential_label = ""
     if target_provider.startswith("custom:"):
         custom_pdef = resolve_provider_full(
             target_provider,
@@ -864,10 +931,12 @@ def switch_model(
             runtime = resolve_runtime_provider(
                 requested=target_provider,
                 target_model=new_model,
+                credential_label=credential_target,
             )
             api_key = runtime.get("api_key", "")
             base_url = runtime.get("base_url", "")
             api_mode = runtime.get("api_mode", "")
+            selected_credential_label = str(runtime.get("credential_label", "") or "").strip()
         except Exception as e:
             return ModelSwitchResult(
                 success=False,
@@ -893,6 +962,7 @@ def switch_model(
                 api_key = runtime.get("api_key", "")
                 base_url = runtime.get("base_url", "")
                 api_mode = runtime.get("api_mode", "")
+                selected_credential_label = str(runtime.get("credential_label", "") or "").strip()
         except Exception:
             pass
 
@@ -907,6 +977,9 @@ def switch_model(
                 api_key = "no-key-required"
 
     # --- Normalize model name for target provider ---
+    if selected_credential_label:
+        provider_label = f"{provider_label} — {selected_credential_label}"
+
     new_model = normalize_model_for_provider(new_model, target_provider)
 
     # --- Validate ---
@@ -1034,6 +1107,7 @@ def switch_model(
         api_mode=api_mode,
         warning_message=" | ".join(warnings) if warnings else "",
         provider_label=provider_label,
+        credential_label=selected_credential_label,
         resolved_via_alias=resolved_alias,
         capabilities=capabilities,
         model_info=model_info,
@@ -1365,7 +1439,7 @@ def list_authenticated_providers(
 
         results.append({
             "slug": hermes_slug,
-            "name": get_label(hermes_slug),
+            "name": _format_provider_name(get_label(hermes_slug), hermes_slug),
             "is_current": hermes_slug == current_provider or pid == current_provider,
             "is_user_defined": False,
             "models": top,
@@ -1438,7 +1512,7 @@ def list_authenticated_providers(
 
         results.append({
             "slug": _cp.slug,
-            "name": _cp.label,
+            "name": _format_provider_name(_cp.label, _cp.slug),
             "is_current": _cp.slug == current_provider,
             "is_user_defined": False,
             "models": _cp_top,
@@ -1749,6 +1823,29 @@ def list_picker_providers(
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if not has_models and not is_custom_endpoint:
             continue
+
+        pool_entries = _credential_pool_entries(slug)
+        if len(pool_entries) > 1:
+            base_name = str(p.get("name", "")).split(" — ", 1)[0].strip() or str(p.get("name", ""))
+            active_label, _ = _credential_pool_labels(slug)
+            for entry_id, label in pool_entries:
+                row = dict(p)
+                row["slug"] = f"{slug}#{entry_id}" if entry_id else slug
+                row["name"] = f"{base_name} — {label}"
+                row["is_current"] = bool(p.get("is_current")) and label == active_label
+                row["credential_label"] = label
+                filtered.append(row)
+            continue
+
+        # Single pooled credential: still show the friendly label.
+        active_label, labels = _credential_pool_labels(slug)
+        if labels:
+            base_name = str(p.get("name", "")).split(" — ", 1)[0].strip() or str(p.get("name", ""))
+            p = dict(p)
+            p["name"] = _format_provider_name(base_name, slug, show_all_labels=False)
+            if active_label:
+                p["credential_label"] = active_label
+
         filtered.append(p)
 
     return filtered

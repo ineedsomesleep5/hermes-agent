@@ -94,6 +94,18 @@ class TestPerCapabilityBackendSelection:
         monkeypatch.setenv("EXA_API_KEY", "test-key")
         assert web_tools._get_extract_backend() == "exa"
 
+    def test_tinyfish_backend_overrides_generic(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
+            "backend": "tavily",
+            "search_backend": "tinyfish",
+            "extract_backend": "tinyfish",
+        })
+        monkeypatch.setenv("TINYFISH_API_KEY", "test-key")
+        assert web_tools._get_search_backend() == "tinyfish"
+        assert web_tools._get_extract_backend() == "tinyfish"
+
     def test_falls_back_to_generic_backend_when_search_backend_empty(self, monkeypatch):
         from tools import web_tools
 
